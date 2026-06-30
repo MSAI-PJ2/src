@@ -65,7 +65,11 @@ async def respond(body: RespondIn):
     tts = body.tts.model_dump(exclude_none=True) if body.tts else None
 
     if not text:
-        # Accept STT/TTS-shaped payloads now, but fail gracefully until STT is wired.
+        if body.audio:
+            return StreamingResponse(
+                dag.stt_then_respond_stream(body.session_id, input_meta, tts),
+                media_type="text/event-stream",
+            )
         return StreamingResponse(
             dag.input_pending_stream(body.session_id, input_meta, tts),
             media_type="text/event-stream",
