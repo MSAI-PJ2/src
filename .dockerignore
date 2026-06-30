@@ -1,0 +1,12 @@
+# 빌드 컨텍스트(repo root)에서 대용량/불필요 파일 제외 — 모델은 볼륨 마운트라 이미지에 안 들어감
+cogdist_model_distilled/
+cogdist_model_b8/
+frontend/
+**/__pycache__/
+**/*.pyc
+.env
+*.md
+이미지*.png
+.git/
+data/
+services/**/smoke_out.txt
