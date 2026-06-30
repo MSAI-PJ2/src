@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic>=2
+httpx
+openai>=1.40
+azure-search-documents>=11.6.0
+azure-cognitiveservices-speech>=1.38.0
+pydub>=0.25.1

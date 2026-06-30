@@ -1,0 +1,18 @@
+﻿# Build context excludes
+**/__pycache__/
+**/*.pyc
+.env
+.venv/
+.git/
+
+# Large/unrelated project assets
+cogdist_model_distilled/
+cogdist_model_b8/
+cogdist_multilabel/
+frontend/
+data/
+*.png
+*.jpg
+*.jpeg
+*.pdf
+services/**/smoke_out.txt

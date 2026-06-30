@@ -1,0 +1,1 @@
+﻿{"session_id": "tts-test-1", "text": "사람들 앞에 서면 다 망칠 것 같아요", "tts": {"enabled": true, "provider": "azure", "voice": "ko-KR-SunHiNeural", "format": "mp3"}}

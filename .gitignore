@@ -1,0 +1,16 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.env
+.venv/
+
+# Local/editor
+.vscode/
+.idea/
+
+# Secrets
+*.key
+*.pem
+secrets.*
+
+.env
