@@ -65,3 +65,9 @@ COSMOS_CONTAINER=<container>
 - Azure 상태: Healthy / Traffic 100
 - 회귀 테스트 PASS: health, auth 401, classify, respond text, session read, crisis, transcript, TTS, audio STT success, audio STT failure
 - 로컬 검증: `py_compile` 및 `git diff --check` 통과
+
+## 다음 작업: Document Intelligence OCR 연결
+- 목표: `DOCINTEL_*` 환경변수를 사용해 Azure AI Document Intelligence `prebuilt-read` OCR을 Gateway에 연결한다.
+- 예상 입력: `/v1/respond`의 `input_type=document`, `document.kind=base64|url`.
+- 예상 SSE: `document(processing) -> document(completed|error) -> meta/chunks/token... -> done`.
+- 보안 주의: URL 입력은 SSRF 방어, base64 입력은 크기 제한, OCR 원문 로그 출력 금지.

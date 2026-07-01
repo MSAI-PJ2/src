@@ -5,9 +5,9 @@
 ## 현재 상태
 
 ```text
-Gateway revision: api-gateway--0000021
-Gateway image: acrregistry001.azurecr.io/gateway:refactor-3-2-service-adapters-20260701
-Git branch: refactor/gateway-3-3-cosmos-session-repository
+Gateway revision: api-gateway--0000023
+Gateway image: acrregistry001.azurecr.io/gateway:refactor-3-3-cosmos-session-20260701
+Git branch: main
 Git commit: 32f0174 기준 + 3-3 Cosmos session branch 작업 중
 Framework: FastAPI + Uvicorn
 Python: 3.11
@@ -17,7 +17,7 @@ Auth: x-api-key required
 Cogdist: cogdistmodel--0000004, Azure Files subPath=v2
 RAG: cbt-rag-search / cbt-rag-index
 Speech: Azure Speech SDK + pydub + ffmpeg 유지
-Status: refactor 3-2 Azure regression PASS
+Status: refactor 3-3 Cosmos session persistence PASS
 ```
 
 ## 포함 항목
@@ -133,8 +133,8 @@ crisis:     meta -> crisis -> done
 ## 최근 Azure 검증
 
 ```text
-revision: api-gateway--0000021
-image: acrregistry001.azurecr.io/gateway:refactor-3-2-service-adapters-20260701
+revision: api-gateway--0000023
+image: acrregistry001.azurecr.io/gateway:refactor-3-3-cosmos-session-20260701
 healthz: PASS
 auth 401: PASS
 classify: PASS
@@ -147,6 +147,7 @@ transcript: PASS
 TTS: PASS
 audio STT success: PASS
 audio STT failure: PASS
+Cosmos session persistence: PASS
 ```
 
 ## 컨테이너 빌드 예시
@@ -166,3 +167,13 @@ az acr build \
 - `API_KEY`, `CONTENT_SAFETY_KEY`, `AZURE_SEARCH_API_KEY`, `AZURE_OPENAI_API_KEY`는 절대 파일에 넣지 말고 Azure Container App secret 또는 로컬 환경변수로 주입하세요.
 - `COSMOS_KEY`도 동일하게 Azure Container App secret 또는 로컬 환경변수로만 주입하세요.
 - `.env`, `__pycache__`, `*.pyc`, smoke output은 공유 대상에서 제외했습니다.
+
+## 다음 작업: Document Intelligence OCR 연결
+
+```text
+목표: Azure AI Document Intelligence prebuilt-read를 Gateway 입력 경로에 연결한다.
+현재: .env.example에 DOCINTEL_ENDPOINT / DOCINTEL_KEY / DOCINTEL_API_VERSION / DOCINTEL_MODEL_ID 예시 반영 완료
+예상 입력: input_type=document, document.kind=base64|url
+예상 SSE: document(processing) -> document(completed|error) -> meta/chunks/token... -> done
+보안: DOCINTEL_KEY는 secretref, document.url은 SSRF 방어, base64는 크기 제한
+```
