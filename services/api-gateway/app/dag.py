@@ -1,62 +1,16 @@
-import asyncio
-import json
-
-import httpx
-
+﻿import asyncio
 from common.llm_client import LLMClient
-from common.speech_client import synthesize_speech_base64, transcribe_audio_input_detailed
+from common.speech_client import transcribe_audio_input_detailed
 from retrieve.client import get_retriever
 
-from . import clients, crisis, sessions, settings
+from . import clients, crisis, sessions
+from .events import sse
+from .ranking import rerank
+from .safety import safety_check
+from .tts import synthesize_tts
 
 _retriever = get_retriever()
 
-
-def sse(obj: dict) -> str:
-    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
-
-
-# 위험 신호 키워드 (interim stub — 추후 Azure AI Content Safety로 교체)
-_RISK_KEYWORDS = (
-    "자살", "죽고싶", "자해", "끝내고싶", "사라지고싶",
-    "살이유가없", "살이유없", "목숨", "뛰어내리", "죽어버",
-)
-
-
-def _keyword_check(text: str) -> dict:
-    # 공백 제거 후 키워드 매칭 (Content Safety 폴백/오프라인용)
-    flat = text.replace(" ", "")
-    matched = [k for k in _RISK_KEYWORDS if k in flat]
-    if matched:
-        return {"safe": False, "reason": "self_harm_signal", "matched": matched}
-    return {"safe": True, "reason": None}
-
-
-async def safety_check(text: str) -> dict:
-    """안전 게이트. Content Safety 연동 시 실호출, 미설정/장애 시 키워드 폴백(fail-safe)."""
-    if settings.CONTENT_SAFETY_ENABLED and settings.CONTENT_SAFETY_ENDPOINT and settings.CONTENT_SAFETY_KEY:
-        url = settings.CONTENT_SAFETY_ENDPOINT.rstrip("/") + "/contentsafety/text:analyze?api-version=2024-09-01"
-        try:
-            async with httpx.AsyncClient(timeout=settings.CONTENT_SAFETY_TIMEOUT) as c:
-                resp = await c.post(url, json={"text": text},
-                                    headers={"Ocp-Apim-Subscription-Key": settings.CONTENT_SAFETY_KEY})
-                resp.raise_for_status()
-                cats = {x["category"]: x["severity"] for x in resp.json().get("categoriesAnalysis", [])}
-            flagged = {k: v for k, v in cats.items() if v >= settings.CONTENT_SAFETY_THRESHOLD}
-            if flagged:
-                reason = "self_harm" if "SelfHarm" in flagged else max(flagged, key=flagged.get).lower()
-                return {"safe": False, "reason": reason, "categories": cats, "source": "content_safety"}
-            return {"safe": True, "reason": None, "categories": cats, "source": "content_safety"}
-        except Exception as e:
-            # Content Safety 장애 → 키워드 폴백(명백한 위기 누락 방지)
-            r = _keyword_check(text)
-            r["source"] = "keyword_fallback"
-            r["cs_error"] = str(e)[:140]
-            return r
-    # 비활성/미설정 → 키워드 stub
-    r = _keyword_check(text)
-    r["source"] = "keyword"
-    return r
 
 
 async def classify(text: str) -> dict:
@@ -64,71 +18,9 @@ async def classify(text: str) -> dict:
 
 
 async def retrieve(text: str) -> list[dict]:
-    # 연결 구조만: RETRIEVE_PROVIDER=local(stub) / azure(Azure AI Search — 팀원 구현).
+    # 연결 구조만: RETRIEVE_PROVIDER=local(stub) / azure(Azure AI Search).
     # 동기 retriever를 스레드로 돌려 gather 동시성을 유지한다.
     return await asyncio.to_thread(_retriever.retrieve, text)
-
-
-async def synthesize_tts(text: str, tts_options: dict | None) -> dict:
-    """Build a TTS SSE payload without blocking the response flow.
-
-    Canonical contract:
-      type=tts, status=completed|error, provider=azure,
-      audio={kind,data,mime_type}, audio_base64(deprecated alias).
-    """
-    voice = (tts_options or {}).get("voice")
-    try:
-        audio_b64 = await asyncio.to_thread(synthesize_speech_base64, text, voice)
-        return {
-            "status": "completed",
-            "provider": "azure",
-            "text": text,
-            "mime_type": "audio/wav",
-            "format": "wav",
-            "audio": {"kind": "base64", "data": audio_b64, "mime_type": "audio/wav"},
-            "audio_base64": audio_b64,
-            "options": tts_options,
-        }
-    except Exception as exc:
-        return {
-            "status": "error",
-            "provider": "azure",
-            "text": text,
-            "error": str(exc)[:300],
-            "options": tts_options,
-        }
-
-def rerank(
-    candidates: list[dict],
-    primary: str,
-    confidence: float,
-    top_n: int | None = None,
-) -> list[dict]:
-    top_n = top_n or settings.RERANK_TOP_N
-    if not candidates:
-        return []
-
-    scores = [float(c.get("score", 0.0)) for c in candidates]
-    min_score = min(scores)
-    max_score = max(scores)
-    span = max_score - min_score
-
-    use_bias = primary not in ("정상", "불충분") and confidence >= 0.5
-    deduped: dict[str, dict] = {}
-
-    for candidate in candidates:
-        raw_score = float(candidate.get("score", 0.0))
-        normalized = 1.0 if span == 0 else (raw_score - min_score) / span
-        distortions = candidate.get("metadata", {}).get("distortions", [])
-        final_score = normalized + (0.3 if use_bias and primary in distortions else 0.0)
-
-        ranked = {**candidate, "score": final_score}
-        candidate_id = ranked.get("id")
-
-        if candidate_id not in deduped or final_score > deduped[candidate_id]["score"]:
-            deduped[candidate_id] = ranked
-
-    return sorted(deduped.values(), key=lambda c: c["score"], reverse=True)[:top_n]
 
 
 async def stt_then_respond_stream(
@@ -343,3 +235,4 @@ async def respond_stream(
     yield sse({"type": "done", "session_id": session_id})
 
 respond_stream._llm = LLMClient()
+
