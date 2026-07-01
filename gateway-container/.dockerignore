@@ -1,5 +1,5 @@
-# Default deny: keep Docker/ACR build context small and stable.
-# This file is applied when the build context is gateway-container/.
+﻿# 기본 차단 방식: Docker/ACR 빌드 컨텍스트를 작고 안정적으로 유지합니다.
+# 이 파일은 빌드 컨텍스트가 gateway-container/일 때 적용됩니다.
 *
 
 !.dockerignore
