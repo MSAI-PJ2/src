@@ -1,8 +1,8 @@
-# Local api-gateway compose. Run from repository root with:
+﻿# 로컬 api-gateway compose입니다. 리포지토리 루트에서 아래 명령으로 실행합니다.
 # docker compose -f gateway-container/docker-compose.yml up --build api-gateway
 #
-# Full local cogdist stack still requires a local cogdist service/model path, which is
-# not part of this gateway-container folder.
+# 전체 로컬 cogdist 스택을 실행하려면 별도 cogdist 서비스/모델 경로가 필요합니다.
+# 해당 리소스는 gateway-container 폴더에 포함하지 않습니다.
 services:
   api-gateway:
     build:
@@ -19,8 +19,8 @@ services:
       CONTENT_SAFETY_KEY: ${CONTENT_SAFETY_KEY:-}
       CONTENT_SAFETY_THRESHOLD: ${CONTENT_SAFETY_THRESHOLD:-2}
       LLM_PROVIDER: ${LLM_PROVIDER:-local}
-      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://host.docker.internal:8002/v1}
-      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-nemotron-3-super-no-think}
+      LOCAL_LLM_API_BASE: ${LOCAL_LLM_API_BASE:-http://host.docker.internal:8001/v1}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-local-model}
       LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-dummy}
     ports:
       - "${GATEWAY_HOST_PORT:-8080}:8080"
