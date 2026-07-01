@@ -34,10 +34,26 @@ scripts/                Gateway SSE 회귀 테스트 스크립트
 ```text
 services/api-gateway/app/main.py      FastAPI route entrypoint
 services/api-gateway/app/dag.py       respond orchestration
+services/api-gateway/app/request_context.py
+                                      /v1/respond 입력 정규화 context
+services/api-gateway/app/repositories/session_repository.py
+                                      Cosmos DB 전환 대비 session repository boundary
+services/api-gateway/app/payloads.py  SSE/API payload builder
+services/api-gateway/app/turns.py     session turn builder
+services/api-gateway/app/prompts.py   LLM message builder
 services/api-gateway/app/events.py    SSE serialization
 services/api-gateway/app/safety.py    Content Safety + keyword fallback
 services/api-gateway/app/tts.py       TTS payload builder
 services/api-gateway/app/ranking.py   RAG rerank helper
+```
+
+## 3차-1 리팩터링 의도
+
+```text
+목표: Cosmos DB 연결 직전에 dag.py/main.py가 저장소 구현에 직접 의존하지 않게 경계를 만든다.
+현재: repositories/session_repository.py가 기존 in-memory sessions.py를 감싼다.
+다음: Cosmos DB adapter를 추가해도 /v1/respond, /v1/sessions API 계약은 유지한다.
+주의: 이번 단계는 DB 연결이 아니라 교체 가능한 경계 생성이다.
 ```
 
 ## 주요 엔드포인트

@@ -14,10 +14,17 @@
 - TTS: SSE `tts` event에서 `audio.data`를 canonical로 사용하고 `audio_base64`는 호환 alias로 제공
 - STT: `audio.kind=url|base64` 지원. `stt` SSE event로 processing/completed/error를 명시
 - Refactor: DAG 보조 로직을 `events.py`, `safety.py`, `tts.py`, `ranking.py`로 분리 완료
+- Refactor 2: `payloads.py`, `turns.py`, `prompts.py`로 SSE payload/session turn/LLM message builder 분리 완료
+- Refactor 3-1 준비: `request_context.py`, `repositories/session_repository.py`로 Cosmos DB 교체 전 입력 정규화/세션 저장소 경계 생성
 
 ## 주요 경로
 - `services/api-gateway/app/main.py`: FastAPI entrypoint
 - `services/api-gateway/app/dag.py`: respond orchestration / STT→DAG 연결
+- `services/api-gateway/app/request_context.py`: `/v1/respond` 입력 정규화 context
+- `services/api-gateway/app/repositories/session_repository.py`: 현재 in-memory session store를 감싸는 repository boundary
+- `services/api-gateway/app/payloads.py`: SSE/API payload builder
+- `services/api-gateway/app/turns.py`: session turn builder
+- `services/api-gateway/app/prompts.py`: LLM message builder
 - `services/api-gateway/app/events.py`: SSE serialization helper
 - `services/api-gateway/app/safety.py`: Content Safety + keyword fallback
 - `services/api-gateway/app/tts.py`: TTS SSE payload builder

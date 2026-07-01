@@ -3,7 +3,7 @@ from common.llm_client import LLMClient
 from common.speech_client import transcribe_audio_input_detailed
 from retrieve.client import get_retriever
 
-from . import clients, crisis, sessions
+from . import clients, crisis
 from .events import sse
 from .payloads import (
     INPUT_REQUIRED_STT_MESSAGE,
@@ -19,6 +19,8 @@ from .payloads import (
 )
 from .prompts import build_llm_messages
 from .ranking import rerank
+from .repositories import session_repository
+from .request_context import RespondRequestContext, default_text_input_meta
 from .safety import safety_check
 from .tts import synthesize_tts
 from .turns import assistant_turn, crisis_turn, input_pending_turn, stt_failed_turn, user_turn
@@ -42,19 +44,17 @@ async def stt_then_respond_stream(
     tts: dict | None = None,
 ):
     """Transcribe audio, emit STT debug events, then continue the existing DAG."""
-    session = sessions.ensure_session(session_id)
+    context = RespondRequestContext(session_id, None, input_meta or {}, tts)
+    session = session_repository.ensure(context.session_id)
     session_id = session["session_id"]
-    input_meta = input_meta or {}
-    audio = input_meta.get("audio") or {}
-    stt_options = input_meta.get("stt") or {}
-    language = stt_options.get("language") or audio.get("language") or "ko-KR"
+    context = RespondRequestContext(session_id, context.text, context.input_meta, context.tts)
 
-    yield sse(stt_processing_payload(session_id, stt_options.get("provider") or "azure", language))
+    yield sse(stt_processing_payload(session_id, context.stt_provider, context.language))
 
-    result = await asyncio.to_thread(transcribe_audio_input_detailed, audio)
+    result = await asyncio.to_thread(transcribe_audio_input_detailed, context.audio)
 
     if result.get("status") != "completed" or not result.get("transcript"):
-        sessions.append_turn(session_id, stt_failed_turn(input_meta, result, tts))
+        session_repository.append_turn(session_id, stt_failed_turn(context.input_meta, result, context.tts))
         yield sse(stt_result_payload(session_id, result))
         yield sse(
             input_required_payload(
@@ -66,21 +66,10 @@ async def stt_then_respond_stream(
         yield sse(done_payload(session_id))
         return
 
-    input_meta = {
-        **input_meta,
-        "input_type": "transcript",
-        "stt": {
-            **stt_options,
-            "provider": result.get("provider"),
-            "language": result.get("language") or language,
-            "transcript": result.get("transcript"),
-            "confidence": result.get("confidence"),
-            "recognition_status": result.get("recognition_status"),
-        },
-    }
+    context = context.with_transcript(result)
     yield sse(stt_result_payload(session_id, result))
 
-    async for event in respond_stream(result["transcript"], session_id, input_meta, tts):
+    async for event in respond_stream(context.text or "", session_id, context.input_meta, context.tts):
         yield event
 
 
@@ -90,11 +79,11 @@ async def input_pending_stream(
     tts: dict | None = None,
 ):
     """Accept future STT/TTS payloads even before an STT provider is wired."""
-    session = sessions.ensure_session(session_id)
+    session = session_repository.ensure(session_id)
     session_id = session["session_id"]
     input_meta = input_meta or {}
-    sessions.append_turn(session_id, input_pending_turn(input_meta, tts))
-    turn_count = sessions.snapshot(session_id)["turn_count"]
+    session_repository.append_turn(session_id, input_pending_turn(input_meta, tts))
+    turn_count = session_repository.snapshot(session_id)["turn_count"]
 
     yield sse(meta_payload(session_id, turn_count, input_meta, tts))
     yield sse(input_required_payload(session_id, "text_required", INPUT_REQUIRED_TEXT_MESSAGE))
@@ -107,10 +96,10 @@ async def respond_stream(
     input_meta: dict | None = None,
     tts: dict | None = None,
 ):
-    session = sessions.ensure_session(session_id)
+    session = session_repository.ensure(session_id)
     session_id = session["session_id"]
-    prior_messages = sessions.recent_llm_messages(session_id)
-    input_meta = input_meta or {"input_type": "text"}
+    prior_messages = session_repository.recent_llm_messages(session_id)
+    input_meta = default_text_input_meta(input_meta)
 
     safety, cls, cands = await asyncio.gather(
         safety_check(text),
@@ -124,14 +113,14 @@ async def respond_stream(
         default=0.0,
     )
 
-    sessions.append_turn(session_id, user_turn(text, primary, safety, input_meta, tts))
-    turn_count = sessions.snapshot(session_id)["turn_count"]
+    session_repository.append_turn(session_id, user_turn(text, primary, safety, input_meta, tts))
+    turn_count = session_repository.snapshot(session_id)["turn_count"]
     yield sse(meta_payload(session_id, turn_count, input_meta, tts, cls))
 
     if not safety["safe"]:
         payload = crisis.crisis_payload(reason=safety.get("reason"))
         yield sse(payload)
-        sessions.append_turn(session_id, crisis_turn(payload))
+        session_repository.append_turn(session_id, crisis_turn(payload))
         if tts and tts.get("enabled"):
             tts_event = await synthesize_tts(payload.get("message", ""), tts)
             yield sse(tts_payload(session_id, tts_event))
@@ -151,7 +140,7 @@ async def respond_stream(
 
     assistant_text = "".join(assistant_parts).strip()
     if assistant_text:
-        sessions.append_turn(session_id, assistant_turn(assistant_text, primary, chunks))
+        session_repository.append_turn(session_id, assistant_turn(assistant_text, primary, chunks))
 
     if tts and tts.get("enabled"):
         tts_event = await synthesize_tts(assistant_text, tts)
