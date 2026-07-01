@@ -10,7 +10,7 @@
 - Safety: Azure AI Content Safety
 - RAG: Azure AI Search `cbt-rag-search` / `cbt-rag-index`
 - LLM: Azure OpenAI `gpt-4.1-mini` Chat Completions
-- Speech: 팀원 작업물의 Azure Speech SDK + pydub + ffmpeg 방식 유지
+- Speech: Azure Speech SDK + pydub + ffmpeg 방식 유지
 - TTS: SSE `tts` event에서 `audio.data`를 canonical로 사용하고 `audio_base64`는 호환 alias로 제공
 - STT: `audio.kind=url|base64` 지원. 개선 브랜치에서는 `stt` SSE event로 processing/completed/error를 명시
 

@@ -1,7 +1,7 @@
 ﻿# API Gateway API 계약서
 
 이 문서는 `fix/gateway-api-contract-debugging-local` 브랜치 기준의 API 계약 정리본이다.
-팀원 작업물의 Azure Speech SDK/ffmpeg 구조는 유지하고, 디버깅과 SSE 이벤트 계약만 보강하는 방향이다.
+기존 Azure Speech SDK/ffmpeg 구조는 유지하고, 디버깅과 SSE 이벤트 계약만 보강하는 방향이다.
 
 ## 1. 기준 상태
 
@@ -25,6 +25,14 @@ Speech: Azure Speech SDK + pydub + ffmpeg
 Azure 배포 검증 전까지는 운영 확정 계약이 아니라 테스트 후보 계약으로 본다.
 ```
 
+문서 표기 규칙:
+
+```text
+- 예시 JSON 블록은 실제 요청/응답에 가까운 형태로 작성한다.
+- JSON 내부에는 주석을 넣지 않는다. 대신 각 예시 아래의 "필드 주석"에서 의미와 주의점을 설명한다.
+- 프론트 구현은 필드 주석의 "권장 사용" 항목을 우선 따른다.
+```
+
 ## 2. 공통 헤더
 
 ```http
@@ -44,6 +52,13 @@ GET /healthz
 
 ```json
 {"status":"ok"}
+```
+
+필드 주석:
+
+```text
+status: Gateway 프로세스가 HTTP 요청을 받을 수 있는지만 확인한다.
+주의: 내부 cogdist/RAG/LLM/Speech까지 모두 정상이라는 의미는 아니다.
 ```
 
 ## 4. Classify
@@ -78,6 +93,15 @@ POST /v1/classify
 
 모델 교체 후 `primary` 값은 달라질 수 있으나, `primary`, `labels[]`, `score`, `selected` 구조는 유지한다.
 
+필드 주석:
+
+```text
+primary: Gateway가 후속 RAG/LLM 프롬프트에 넘기는 대표 인지왜곡 라벨.
+labels: 전체 라벨별 점수 목록. UI에서 상세 분석을 보여줄 때 사용한다.
+selected: threshold 기준으로 선택된 라벨 여부.
+주의: 모델 교체 시 점수와 primary는 달라질 수 있으므로, 프론트는 특정 라벨값을 하드코딩하지 않는다.
+```
+
 ## 5. Batch Classify
 
 ```http
@@ -96,6 +120,13 @@ POST /v1/batch-classify
 ```
 
 응답은 단일 classify 응답 배열이다.
+
+필드 주석:
+
+```text
+texts: 비어 있지 않은 문자열 배열.
+권장 사용: 대량 분석/관리자 도구용. 실시간 채팅 UI는 /v1/respond 사용을 우선한다.
+```
 
 ## 6. Respond 공통
 
@@ -117,6 +148,14 @@ data: {"type":"meta", ...}
 data: {"type":"token", ...}
 
 data: {"type":"done", ...}
+```
+
+필드 주석:
+
+```text
+type: 이벤트 종류. 프론트는 type 기준으로 분기한다.
+session_id: 같은 대화 흐름을 묶는 임시 세션 식별자.
+주의: SSE는 이벤트가 여러 번 도착하므로, 마지막 done 전까지 연결을 유지한다.
 ```
 
 ## 7. Respond - 텍스트 입력
@@ -182,6 +221,15 @@ meta -> chunks -> token... -> done
 }
 ```
 
+필드 주석:
+
+```text
+meta: 분류 결과와 입력 메타데이터를 담는다.
+chunks: RAG 검색 결과. UI에서 출처/근거 패널로 표시 가능하다.
+token: LLM 응답 조각. 여러 token.text를 이어 붙여 최종 답변을 만든다.
+done: 스트림 종료 신호. done 수신 후 UI 로딩 상태를 해제한다.
+```
+
 ## 8. Respond - transcript 입력
 
 브라우저 또는 별도 STT가 이미 transcript를 만든 경우 사용한다.
@@ -207,6 +255,15 @@ meta -> chunks -> token... -> done
 
 ```text
 meta -> chunks -> token... -> done
+```
+
+필드 주석:
+
+```text
+input_type=transcript: 이미 STT가 끝난 텍스트라는 의미.
+stt.provider: mock, browser, azure 등 transcript 출처 표시용.
+stt.confidence: 제공 가능한 경우에만 넣는다. 없으면 생략 가능하다.
+권장 사용: 브라우저 Web Speech API 또는 별도 음성 서비스가 먼저 transcript를 만든 경우.
 ```
 
 ## 9. Respond - audio 입력/STT
@@ -237,7 +294,17 @@ base64: audio.data 사용
 url: audio.url 사용
 ```
 
-팀원 코드의 장점인 `pydub + ffmpeg` 변환 경로는 유지한다. 따라서 `audio/wav`뿐 아니라 브라우저 녹음 포맷도 테스트 대상이다.
+`pydub + ffmpeg` 변환 경로는 유지한다. 따라서 `audio/wav`뿐 아니라 브라우저 녹음 포맷도 테스트 대상이다.
+
+필드 주석:
+
+```text
+audio.kind=base64: 프론트가 오디오 파일을 base64로 직접 실어 보낼 때 사용한다.
+audio.kind=url: Gateway 컨테이너가 접근 가능한 URL을 넘길 때 사용한다.
+audio.mime_type: 변환/인식 경로 판단에 사용한다. 가능하면 정확히 넣는다.
+audio.language: 기본값은 ko-KR. 다국어 입력이 필요하면 명시한다.
+주의: base64 payload는 커질 수 있으므로, 장기적으로는 Blob/SAS URL 방식이 더 적합하다.
+```
 
 ### 9.1 STT 성공 이벤트 순서
 
@@ -274,6 +341,16 @@ stt(processing) -> stt(completed) -> meta -> chunks -> token... -> done
 }
 ```
 
+필드 주석:
+
+```text
+status=processing: 서버가 STT 처리를 시작했다는 신호.
+status=completed: transcript가 생성되어 이후 classify/RAG/LLM 단계로 이어진다는 신호.
+transcript: 이후 DAG에 실제 입력으로 들어가는 텍스트.
+recognition_status: Azure Speech SDK 인식 상태를 프론트/로그에서 확인하기 위한 디버깅 필드.
+confidence: SDK/경로에 따라 없을 수 있으므로 null 허용.
+```
+
 ### 9.2 STT 실패 이벤트 순서
 
 ```text
@@ -305,6 +382,15 @@ stt(processing) -> stt(error|no_match) -> input_required -> done
   "reason": "error",
   "message": "audio payload was accepted, but STT did not produce a transcript. Check stt event error/reason, or send text/stt.transcript."
 }
+```
+
+필드 주석:
+
+```text
+status=no_match: 음성은 처리했지만 인식 가능한 발화가 없다는 의미.
+status=error: 키/권한/포맷/ffmpeg/Azure Speech 호출 등 처리 오류.
+error: 개발/테스트 디버깅용 메시지. 운영 UI에서는 그대로 노출하지 않는 것이 좋다.
+input_required: 프론트가 사용자에게 텍스트 재입력 또는 음성 재녹음을 요청할 때 사용한다.
 ```
 
 ## 10. Respond - TTS
@@ -365,6 +451,17 @@ mime_type = event.get("audio", {}).get("mime_type") or event.get("mime_type")
 
 `event.audio.data`가 canonical이다. `event.audio_base64`는 구버전 호환 alias다.
 
+필드 주석:
+
+```text
+status=completed: TTS 오디오 생성 성공.
+status=error: LLM 응답은 생성됐지만 TTS 변환만 실패.
+audio.data: 권장 base64 오디오 필드.
+audio_base64: 기존 클라이언트 호환용 alias. 신규 구현은 audio.data를 우선 사용한다.
+mime_type: 현재 SDK 경로는 audio/wav 기준. mp3가 필요하면 별도 변환/출력 설정을 확정해야 한다.
+주의: TTS 실패가 전체 응답 실패를 의미하지는 않는다. token 응답은 그대로 사용할 수 있다.
+```
+
 ## 11. Crisis 분기
 
 자해/자살 위험 신호가 감지되면 LLM 응답 대신 crisis 이벤트를 반환한다.
@@ -389,6 +486,15 @@ meta -> crisis -> done
 }
 ```
 
+필드 주석:
+
+```text
+blocked=true: 안전 배리어가 일반 LLM 응답을 차단했다는 의미.
+reason: self_harm 등 차단 사유.
+message/resources: UI가 사용자에게 표시할 안전 안내.
+주의: crisis 이벤트에서는 일반 token 응답을 기대하지 않는다.
+```
+
 ## 12. Session
 
 ```http
@@ -403,6 +509,14 @@ GET /v1/sessions/{session_id}
 ```text
 Container App 재시작, revision 변경, replica 변경 시 세션이 사라질 수 있다.
 Cosmos DB 연동 전까지 운영 세션 저장소로 보면 안 된다.
+```
+
+필드 주석:
+
+```text
+session_id: 없으면 Gateway가 생성할 수 있으나, 프론트 테스트에서는 명시하는 편이 추적하기 쉽다.
+turn_count: 현재 세션 내 턴 수.
+주의: 현재 세션은 임시 메모리 저장소다. 개인정보/상담기록의 영구 저장 정책은 Cosmos DB 설계 후 확정한다.
 ```
 
 ## 13. 프론트 SSE 처리 예시
