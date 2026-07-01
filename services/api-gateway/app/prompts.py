@@ -1,0 +1,26 @@
+﻿"""LLM prompt/message builders."""
+
+
+def build_system_prompt(primary: str, chunks: list[dict]) -> str:
+    # Preserve the current prompt text exactly during refactor. Prompt quality
+    # changes should happen in a separate prompt-focused branch.
+    system = (
+        "??? ???? ??? ???? ??? ??? ?? ??????. "
+        "?? ?? ?? ??? ?? ?? ??? ????, ???? ??? ???? ?? "
+        "????? ????. ??? ???? ??: " + primary
+    )
+    context = "\n".join(f"- {chunk['content']}" for chunk in chunks)
+    return system + "\n[?? ?? ??]\n" + context
+
+
+def build_llm_messages(
+    primary: str,
+    chunks: list[dict],
+    prior_messages: list[dict],
+    user_text: str,
+) -> list[dict]:
+    return [
+        {"role": "system", "content": build_system_prompt(primary, chunks)},
+        *prior_messages,
+        {"role": "user", "content": user_text},
+    ]

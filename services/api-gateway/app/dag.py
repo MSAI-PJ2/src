@@ -5,12 +5,25 @@ from retrieve.client import get_retriever
 
 from . import clients, crisis, sessions
 from .events import sse
+from .payloads import (
+    INPUT_REQUIRED_STT_MESSAGE,
+    INPUT_REQUIRED_TEXT_MESSAGE,
+    chunks_payload,
+    done_payload,
+    input_required_payload,
+    meta_payload,
+    stt_processing_payload,
+    stt_result_payload,
+    token_payload,
+    tts_payload,
+)
+from .prompts import build_llm_messages
 from .ranking import rerank
 from .safety import safety_check
 from .tts import synthesize_tts
+from .turns import assistant_turn, crisis_turn, input_pending_turn, stt_failed_turn, user_turn
 
 _retriever = get_retriever()
-
 
 
 async def classify(text: str) -> dict:
@@ -36,36 +49,21 @@ async def stt_then_respond_stream(
     stt_options = input_meta.get("stt") or {}
     language = stt_options.get("language") or audio.get("language") or "ko-KR"
 
-    yield sse({
-        "type": "stt",
-        "session_id": session_id,
-        "status": "processing",
-        "provider": stt_options.get("provider") or "azure",
-        "language": language,
-    })
+    yield sse(stt_processing_payload(session_id, stt_options.get("provider") or "azure", language))
 
     result = await asyncio.to_thread(transcribe_audio_input_detailed, audio)
 
     if result.get("status") != "completed" or not result.get("transcript"):
-        sessions.append_turn(
-            session_id,
-            {
-                "role": "user",
-                "text": "",
-                "event": "stt_failed",
-                "input": input_meta,
-                "stt_result": result,
-                "tts": tts,
-            },
+        sessions.append_turn(session_id, stt_failed_turn(input_meta, result, tts))
+        yield sse(stt_result_payload(session_id, result))
+        yield sse(
+            input_required_payload(
+                session_id,
+                result.get("status") or "stt_failed",
+                INPUT_REQUIRED_STT_MESSAGE,
+            )
         )
-        yield sse({"type": "stt", "session_id": session_id, **result})
-        yield sse({
-            "type": "input_required",
-            "session_id": session_id,
-            "reason": result.get("status") or "stt_failed",
-            "message": "audio payload was accepted, but STT did not produce a transcript. Check stt event error/reason, or send text/stt.transcript.",
-        })
-        yield sse({"type": "done", "session_id": session_id})
+        yield sse(done_payload(session_id))
         return
 
     input_meta = {
@@ -80,10 +78,11 @@ async def stt_then_respond_stream(
             "recognition_status": result.get("recognition_status"),
         },
     }
-    yield sse({"type": "stt", "session_id": session_id, **result})
+    yield sse(stt_result_payload(session_id, result))
 
     async for event in respond_stream(result["transcript"], session_id, input_meta, tts):
         yield event
+
 
 async def input_pending_stream(
     session_id: str | None = None,
@@ -94,34 +93,12 @@ async def input_pending_stream(
     session = sessions.ensure_session(session_id)
     session_id = session["session_id"]
     input_meta = input_meta or {}
-    sessions.append_turn(
-        session_id,
-        {
-            "role": "user",
-            "text": "",
-            "event": "input_pending",
-            "input": input_meta,
-            "tts": tts,
-        },
-    )
-    yield sse(
-        {
-            "type": "meta",
-            "session_id": session_id,
-            "turn_count": sessions.snapshot(session_id)["turn_count"],
-            "input": input_meta,
-            "tts": tts,
-        }
-    )
-    yield sse(
-        {
-            "type": "input_required",
-            "session_id": session_id,
-            "reason": "text_required",
-            "message": "No text or transcript was provided. Send text, stt.transcript, or an audio payload.",
-        }
-    )
-    yield sse({"type": "done", "session_id": session_id})
+    sessions.append_turn(session_id, input_pending_turn(input_meta, tts))
+    turn_count = sessions.snapshot(session_id)["turn_count"]
+
+    yield sse(meta_payload(session_id, turn_count, input_meta, tts))
+    yield sse(input_required_payload(session_id, "text_required", INPUT_REQUIRED_TEXT_MESSAGE))
+    yield sse(done_payload(session_id))
 
 
 async def respond_stream(
@@ -147,91 +124,39 @@ async def respond_stream(
         default=0.0,
     )
 
-    sessions.append_turn(
-        session_id,
-        {
-            "role": "user",
-            "text": text,
-            "primary": primary,
-            "safety": "safe" if safety.get("safe") else "blocked",
-            "safety_reason": safety.get("reason"),
-            "input": input_meta,
-            "tts": tts,
-        },
-    )
-
-    yield sse(
-        {
-            "type": "meta",
-            "session_id": session_id,
-            "turn_count": sessions.snapshot(session_id)["turn_count"],
-            "primary": primary,
-            "mode": cls["mode"],
-            "labels": cls["labels"],
-            "input": input_meta,
-            "tts": tts,
-        }
-    )
+    sessions.append_turn(session_id, user_turn(text, primary, safety, input_meta, tts))
+    turn_count = sessions.snapshot(session_id)["turn_count"]
+    yield sse(meta_payload(session_id, turn_count, input_meta, tts, cls))
 
     if not safety["safe"]:
         payload = crisis.crisis_payload(reason=safety.get("reason"))
         yield sse(payload)
-        sessions.append_turn(
-            session_id,
-            {
-                "role": "assistant",
-                "text": payload.get("message", ""),
-                "event": "crisis",
-                "blocked": True,
-                "reason": payload.get("reason"),
-            },
-        )
+        sessions.append_turn(session_id, crisis_turn(payload))
         if tts and tts.get("enabled"):
             tts_event = await synthesize_tts(payload.get("message", ""), tts)
-            yield sse({"type": "tts", "session_id": session_id, **tts_event})
-        yield sse({"type": "done", "session_id": session_id})
+            yield sse(tts_payload(session_id, tts_event))
+        yield sse(done_payload(session_id))
         return
 
     chunks = rerank(cands, primary, confidence)
-    chunk_refs = [{"id": c["id"], "content": c["content"]} for c in chunks]
-    yield sse({"type": "chunks", "session_id": session_id, "chunks": chunk_refs})
+    yield sse(chunks_payload(session_id, chunks))
 
-    sys = (
-        "??? ???? ??? ???? ??? ??? ?? ??????. "
-        "?? ?? ?? ??? ?? ?? ??? ????, ???? ??? ???? ?? "
-        "????? ????. ??? ???? ??: " + primary
-    )
-    ctx = "\n".join(f"- {c['content']}" for c in chunks)
-    messages = [
-        {"role": "system", "content": sys + "\n[?? ?? ??]\n" + ctx},
-        *prior_messages,
-        {"role": "user", "content": text},
-    ]
-
+    messages = build_llm_messages(primary, chunks, prior_messages, text)
     assistant_parts: list[str] = []
     # NOTE: single-user skeleton: chat_stream is a sync generator; iterating here blocks the loop.
     # For concurrency switch to an async OpenAI client later.
     for tok in respond_stream._llm.chat_stream(messages):
         assistant_parts.append(tok)
-        yield sse({"type": "token", "session_id": session_id, "text": tok})
+        yield sse(token_payload(session_id, tok))
 
     assistant_text = "".join(assistant_parts).strip()
     if assistant_text:
-        sessions.append_turn(
-            session_id,
-            {
-                "role": "assistant",
-                "text": assistant_text,
-                "event": "respond",
-                "primary": primary,
-                "rag_chunk_ids": [c["id"] for c in chunks],
-            },
-        )
+        sessions.append_turn(session_id, assistant_turn(assistant_text, primary, chunks))
 
     if tts and tts.get("enabled"):
         tts_event = await synthesize_tts(assistant_text, tts)
-        yield sse({"type": "tts", "session_id": session_id, **tts_event})
+        yield sse(tts_payload(session_id, tts_event))
 
-    yield sse({"type": "done", "session_id": session_id})
+    yield sse(done_payload(session_id))
 
 respond_stream._llm = LLMClient()
