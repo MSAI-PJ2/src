@@ -1,16 +1,18 @@
-﻿# API Gateway API 계약서
+# API Gateway API 계약서
 
-이 문서는 `fix/gateway-api-contract-debugging-local` 브랜치 기준의 API 계약 정리본이다.
-기존 Azure Speech SDK/ffmpeg 구조는 유지하고, 디버깅과 SSE 이벤트 계약만 보강하는 방향이다.
+이 문서는 `main` 기준의 Gateway API 계약 정리본이다.
+Azure Speech SDK/ffmpeg 기반 STT/TTS 구조와 SSE 이벤트 계약을 기준으로 작성한다.
 
 ## 1. 기준 상태
 
 ```text
 Repository: https://github.com/MSAI-PJ2/src.git
+Git main: b8b6084
 Gateway base URL: https://api-gateway.icybush-95bf9b25.koreacentral.azurecontainerapps.io
 Auth: x-api-key 임시 필수
 Runtime: FastAPI + Uvicorn
 Container: Azure Container Apps
+Azure revision: api-gateway--0000016
 Classifier: cogdistmodel internal
 Safety: Azure Content Safety
 RAG: Azure AI Search cbt-rag-index
@@ -18,11 +20,38 @@ LLM: Azure OpenAI gpt-4.1-mini
 Speech: Azure Speech SDK + pydub + ffmpeg
 ```
 
-주의:
+검증 상태:
 
 ```text
-현재 문서는 로컬 개선 브랜치 기준 계약이다.
-Azure 배포 검증 전까지는 운영 확정 계약이 아니라 테스트 후보 계약으로 본다.
+healthz PASS
+auth 401 PASS
+classify PASS
+respond text PASS
+crisis PASS
+TTS PASS
+audio STT success PASS
+audio STT failure PASS
+```
+
+## 1.1 내부 모듈 구조
+
+```text
+services/api-gateway/app/main.py      FastAPI route entrypoint
+services/api-gateway/app/dag.py       respond orchestration / STT to DAG flow
+services/api-gateway/app/events.py    SSE serialization
+services/api-gateway/app/safety.py    Azure Content Safety + keyword fallback
+services/api-gateway/app/tts.py       TTS SSE payload builder
+services/api-gateway/app/ranking.py   RAG candidate rerank
+services/common/speech_client.py      Azure Speech STT/TTS client
+```
+
+설계 메모:
+
+```text
+- dag.py는 요청 orchestration 중심으로 유지한다.
+- safety/tts/ranking/events는 독립 보조 모듈로 분리되어 있다.
+- API 계약은 SSE event type과 payload field를 기준으로 유지한다.
+- 내부 모듈 분리는 프론트 호출 계약을 바꾸지 않는다.
 ```
 
 문서 표기 규칙:

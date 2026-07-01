@@ -5,7 +5,8 @@
 ## 현재 상태
 
 ```text
-Gateway revision: Azure 배포 검증 전 로컬 개선 브랜치 기준
+Gateway revision: api-gateway--0000016
+Git main: b8b6084
 Framework: FastAPI + Uvicorn
 Python: 3.11
 LLM: Azure OpenAI gpt-4.1-mini
@@ -14,6 +15,7 @@ Auth: x-api-key required
 Cogdist: cogdistmodel--0000004, Azure Files subPath=v2
 RAG: cbt-rag-search / cbt-rag-index
 Speech: Azure Speech SDK + pydub + ffmpeg 유지
+Status: Azure 회귀 테스트 통과
 ```
 
 ## 포함 항목
@@ -24,6 +26,18 @@ services/common/        LLM client, including GPT-4.1 mini max_completion_tokens
 services/retrieve/      Azure AI Search retriever client
 .env.example            공유용 환경변수 샘플, 실제 키 없음
 API_CONTRACT.md         프론트/테스트용 API 계약
+scripts/                Gateway SSE 회귀 테스트 스크립트
+```
+
+## 내부 모듈 구조
+
+```text
+services/api-gateway/app/main.py      FastAPI route entrypoint
+services/api-gateway/app/dag.py       respond orchestration
+services/api-gateway/app/events.py    SSE serialization
+services/api-gateway/app/safety.py    Content Safety + keyword fallback
+services/api-gateway/app/tts.py       TTS payload builder
+services/api-gateway/app/ranking.py   RAG rerank helper
 ```
 
 ## 주요 엔드포인트
@@ -53,6 +67,20 @@ crisis:     meta -> crisis -> done
 ```
 
 상세 계약은 `API_CONTRACT.md`를 기준으로 합니다.
+
+## 최근 Azure 검증
+
+```text
+revision: api-gateway--0000016
+healthz: PASS
+auth 401: PASS
+classify: PASS
+respond text: PASS
+crisis: PASS
+TTS: PASS
+audio STT success: PASS
+audio STT failure: PASS
+```
 
 ## 컨테이너 빌드 예시
 
