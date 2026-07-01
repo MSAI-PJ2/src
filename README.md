@@ -21,22 +21,22 @@
 - Refactor 3-3 준비: `SESSION_REPOSITORY=memory|cosmos` 선택형 세션 저장소. Cosmos DB는 이미 배포된 DB/컨테이너에 연결하는 방식.
 
 ## 주요 경로
-- `src/gateway-container/api-gateway/app/main.py`: FastAPI entrypoint
-- `src/gateway-container/api-gateway/app/dag.py`: respond orchestration / STT→DAG 연결
-- `src/gateway-container/api-gateway/app/adapters.py`: 외부 서비스 adapter boundary
-- `src/gateway-container/api-gateway/app/request_context.py`: `/v1/respond` 입력 정규화 context
-- `src/gateway-container/api-gateway/app/repositories/session_repository.py`: in-memory/Cosmos DB 세션 repository boundary
-- `src/gateway-container/api-gateway/app/payloads.py`: SSE/API payload builder
-- `src/gateway-container/api-gateway/app/turns.py`: session turn builder
-- `src/gateway-container/api-gateway/app/prompts.py`: LLM message builder
-- `src/gateway-container/api-gateway/app/events.py`: SSE serialization helper
-- `src/gateway-container/api-gateway/app/safety.py`: Content Safety + keyword fallback
-- `src/gateway-container/api-gateway/app/tts.py`: TTS SSE payload builder
-- `src/gateway-container/api-gateway/app/ranking.py`: RAG candidate rerank
-- `src/gateway-container/api-gateway/app/schemas.py`: request schema
-- `src/gateway-container/common/llm_client.py`: Azure OpenAI client
-- `src/gateway-container/common/retrieve_client.py`: Azure AI Search client
-- `src/gateway-container/common/speech_client.py`: Azure Speech STT/TTS client
+- `gateway-container/api-gateway/app/main.py`: FastAPI entrypoint
+- `gateway-container/api-gateway/app/dag.py`: respond orchestration / STT→DAG 연결
+- `gateway-container/api-gateway/app/adapters.py`: 외부 서비스 adapter boundary
+- `gateway-container/api-gateway/app/request_context.py`: `/v1/respond` 입력 정규화 context
+- `gateway-container/api-gateway/app/repositories/session_repository.py`: in-memory/Cosmos DB 세션 repository boundary
+- `gateway-container/api-gateway/app/payloads.py`: SSE/API payload builder
+- `gateway-container/api-gateway/app/turns.py`: session turn builder
+- `gateway-container/api-gateway/app/prompts.py`: LLM message builder
+- `gateway-container/api-gateway/app/events.py`: SSE serialization helper
+- `gateway-container/api-gateway/app/safety.py`: Content Safety + keyword fallback
+- `gateway-container/api-gateway/app/tts.py`: TTS SSE payload builder
+- `gateway-container/api-gateway/app/ranking.py`: RAG candidate rerank
+- `gateway-container/api-gateway/app/schemas.py`: request schema
+- `gateway-container/common/llm_client.py`: Azure OpenAI client
+- `gateway-container/common/retrieve_client.py`: Azure AI Search client
+- `gateway-container/common/speech_client.py`: Azure Speech STT/TTS client
 - `API_CONTRACT.md`: 프론트/테스트용 API 계약 문서
 - `scripts/gateway_sse_*.py`: Azure 회귀 테스트 스크립트
 

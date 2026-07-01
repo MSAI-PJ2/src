@@ -23,9 +23,9 @@ Status: refactor 3-3 Cosmos session persistence PASS
 ## 포함 항목
 
 ```text
-src/gateway-container/api-gateway/   FastAPI gateway
-src/gateway-container/common/        LLM client, including GPT-4.1 mini max_completion_tokens patch
-src/gateway-container/retrieve/      Azure AI Search retriever client
+gateway-container/api-gateway/   FastAPI gateway
+gateway-container/common/        LLM client, including GPT-4.1 mini max_completion_tokens patch
+gateway-container/retrieve/      Azure AI Search retriever client
 .env.example            공유용 환경변수 샘플, 실제 키 없음
 API_CONTRACT.md         프론트/테스트용 API 계약
 scripts/                Gateway SSE 회귀 테스트 스크립트
@@ -34,20 +34,20 @@ scripts/                Gateway SSE 회귀 테스트 스크립트
 ## 내부 모듈 구조
 
 ```text
-src/gateway-container/api-gateway/app/main.py      FastAPI route entrypoint
-src/gateway-container/api-gateway/app/dag.py       respond orchestration
-src/gateway-container/api-gateway/app/adapters.py  Classifier/Safety/Retriever/LLM/Speech service adapter boundary
-src/gateway-container/api-gateway/app/request_context.py
+gateway-container/api-gateway/app/main.py      FastAPI route entrypoint
+gateway-container/api-gateway/app/dag.py       respond orchestration
+gateway-container/api-gateway/app/adapters.py  Classifier/Safety/Retriever/LLM/Speech service adapter boundary
+gateway-container/api-gateway/app/request_context.py
                                       /v1/respond 입력 정규화 context
-src/gateway-container/api-gateway/app/repositories/session_repository.py
+gateway-container/api-gateway/app/repositories/session_repository.py
                                       memory/Cosmos DB session repository boundary
-src/gateway-container/api-gateway/app/payloads.py  SSE/API payload builder
-src/gateway-container/api-gateway/app/turns.py     session turn builder
-src/gateway-container/api-gateway/app/prompts.py   LLM message builder
-src/gateway-container/api-gateway/app/events.py    SSE serialization
-src/gateway-container/api-gateway/app/safety.py    Content Safety + keyword fallback
-src/gateway-container/api-gateway/app/tts.py       TTS payload builder
-src/gateway-container/api-gateway/app/ranking.py   RAG rerank helper
+gateway-container/api-gateway/app/payloads.py  SSE/API payload builder
+gateway-container/api-gateway/app/turns.py     session turn builder
+gateway-container/api-gateway/app/prompts.py   LLM message builder
+gateway-container/api-gateway/app/events.py    SSE serialization
+gateway-container/api-gateway/app/safety.py    Content Safety + keyword fallback
+gateway-container/api-gateway/app/tts.py       TTS payload builder
+gateway-container/api-gateway/app/ranking.py   RAG rerank helper
 ```
 
 ## 3차-1 리팩터링 의도
@@ -158,7 +158,7 @@ az acr build \
   -g 10ai_2nd_team3 \
   -r acrregistry001 \
   -t gateway:<tag> \
-  -f src/gateway-container/api-gateway/Dockerfile \
+  -f gateway-container/api-gateway/Dockerfile \
   .
 ```
 

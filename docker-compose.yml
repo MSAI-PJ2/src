@@ -25,7 +25,7 @@ services:
   api-gateway:
     build:
       context: .
-      dockerfile: src/gateway-container/api-gateway/Dockerfile
+      dockerfile: gateway-container/api-gateway/Dockerfile
     container_name: mlnode-api-gateway
     environment:
       KLUE_API_URL: http://cogdist:8000

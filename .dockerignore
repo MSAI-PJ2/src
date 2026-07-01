@@ -7,14 +7,13 @@
 !.dockerignore
 
 # api-gateway image inputs. Do not remove unless Dockerfile COPY paths change.
-!src/
-!src/gateway-container/
-!src/gateway-container/api-gateway/
-!src/gateway-container/api-gateway/**
-!src/gateway-container/common/
-!src/gateway-container/common/**
-!src/gateway-container/retrieve/
-!src/gateway-container/retrieve/**
+!gateway-container/
+!gateway-container/api-gateway/
+!gateway-container/api-gateway/**
+!gateway-container/common/
+!gateway-container/common/**
+!gateway-container/retrieve/
+!gateway-container/retrieve/**
 
 # Always exclude generated Python cache even inside whitelisted folders.
 **/__pycache__/
