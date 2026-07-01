@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+﻿FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -8,12 +8,12 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY gateway-container/api-gateway/requirements.txt .
+COPY api-gateway/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY gateway-container/common /app/common
-COPY gateway-container/retrieve /app/retrieve
-COPY gateway-container/api-gateway/app /app/app
+COPY common /app/common
+COPY retrieve /app/retrieve
+COPY api-gateway/app /app/app
 
 EXPOSE 8080
 

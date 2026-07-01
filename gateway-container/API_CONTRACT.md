@@ -6,6 +6,7 @@
 
 ```text
 Repository: https://github.com/MSAI-PJ2/src.git
+Gateway folder: gateway-container/
 Git branch: main
 Gateway base URL: https://api-gateway.icybush-95bf9b25.koreacentral.azurecontainerapps.io
 Auth: x-api-key 임시 필수

@@ -1,0 +1,15 @@
+﻿# Default deny: keep Docker/ACR build context small and stable.
+# This file is applied when the build context is gateway-container/.
+*
+
+!.dockerignore
+
+!api-gateway/
+!api-gateway/**
+!common/
+!common/**
+!retrieve/
+!retrieve/**
+
+**/__pycache__/
+**/*.pyc
