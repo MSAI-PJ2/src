@@ -1,4 +1,4 @@
-﻿# API Gateway API 계약서
+# API Gateway API 계약서
 
 이 문서는 `main` 기준 Gateway API 계약 정리본이다. 2026-07-01 기준 Azure Container Apps 배포와 회귀 테스트 결과를 반영한다.
 

@@ -1,4 +1,4 @@
-﻿# Local api-gateway compose. Run from repository root with:
+# Local api-gateway compose. Run from repository root with:
 # docker compose -f gateway-container/docker-compose.yml up --build api-gateway
 #
 # Full local cogdist stack still requires a local cogdist service/model path, which is
@@ -7,7 +7,7 @@ services:
   api-gateway:
     build:
       context: .
-      dockerfile: api-gateway/Dockerfile
+      dockerfile: services/api-gateway/Dockerfile
     container_name: mlnode-api-gateway
     environment:
       KLUE_API_URL: ${KLUE_API_URL:-http://host.docker.internal:8000}

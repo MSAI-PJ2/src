@@ -97,7 +97,7 @@ class AzureAiSearchRetriever(BaseRetriever):
         except ImportError as exc:
             raise RuntimeError(
                 "Azure AI Search provider requires package 'azure-search-documents'. "
-                "Add it to gateway-container/api-gateway/requirements.txt and rebuild the gateway image."
+                "Add it to gateway-container/services/api-gateway/requirements.txt and rebuild the gateway image."
             ) from exc
 
         self.endpoint = self._normalize_endpoint(os.getenv("AZURE_SEARCH_ENDPOINT", ""))
