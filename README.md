@@ -17,7 +17,7 @@
 - Refactor: DAG 보조 로직을 `events.py`, `safety.py`, `tts.py`, `ranking.py`로 분리 완료
 - Refactor 2: `payloads.py`, `turns.py`, `prompts.py`로 SSE payload/session turn/LLM message builder 분리 완료
 - Refactor 3-1: `request_context.py`, `repositories/session_repository.py`로 Cosmos DB 교체 전 입력 정규화/세션 저장소 경계 생성 및 Azure 회귀 테스트 완료
-- Refactor 3-2: `adapters.py`로 Classifier/Safety/Retriever/LLM/Speech 외부 서비스 경계 분리 진행
+- Refactor 3-2: `adapters.py` service adapter boundary completed and Azure regression tested
 
 ## 주요 경로
 - `services/api-gateway/app/main.py`: FastAPI entrypoint

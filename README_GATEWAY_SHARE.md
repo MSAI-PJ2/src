@@ -5,8 +5,10 @@
 ## 현재 상태
 
 ```text
-Gateway revision: 3차-1 Azure 회귀 테스트 통과 revision
-Git main: 659f91f
+Gateway revision: api-gateway--0000021
+Gateway image: acrregistry001.azurecr.io/gateway:refactor-3-2-service-adapters-20260701
+Git branch: refactor/gateway-3-2-service-adapter-boundary
+Git commit: c6087e4
 Framework: FastAPI + Uvicorn
 Python: 3.11
 LLM: Azure OpenAI gpt-4.1-mini
@@ -15,7 +17,7 @@ Auth: x-api-key required
 Cogdist: cogdistmodel--0000004, Azure Files subPath=v2
 RAG: cbt-rag-search / cbt-rag-index
 Speech: Azure Speech SDK + pydub + ffmpeg 유지
-Status: Azure 회귀 테스트 통과
+Status: refactor 3-2 Azure regression PASS
 ```
 
 ## 포함 항목
@@ -120,11 +122,14 @@ crisis:     meta -> crisis -> done
 ## 최근 Azure 검증
 
 ```text
-revision: 3차-1 request context/session repository boundary 배포 revision
+revision: api-gateway--0000021
+image: acrregistry001.azurecr.io/gateway:refactor-3-2-service-adapters-20260701
 healthz: PASS
 auth 401: PASS
 classify: PASS
 respond text: PASS
+long max_completion_tokens: PASS
+short max_completion_tokens: PASS
 session read: PASS
 crisis: PASS
 transcript: PASS
