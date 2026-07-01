@@ -1,4 +1,4 @@
-﻿# API Gateway 최신 공유 코드
+# API Gateway 최신 공유 코드
 
 이 폴더는 Azure Container Apps `api-gateway` 공유용 최신 코드입니다. 실제 비밀 키는 포함하지 않았습니다.
 
@@ -23,9 +23,9 @@ Status: refactor 3-3 Cosmos session persistence PASS
 ## 포함 항목
 
 ```text
-services/api-gateway/   FastAPI gateway
-services/common/        LLM client, including GPT-4.1 mini max_completion_tokens patch
-services/retrieve/      Azure AI Search retriever client
+src/gateway-container/api-gateway/   FastAPI gateway
+src/gateway-container/common/        LLM client, including GPT-4.1 mini max_completion_tokens patch
+src/gateway-container/retrieve/      Azure AI Search retriever client
 .env.example            공유용 환경변수 샘플, 실제 키 없음
 API_CONTRACT.md         프론트/테스트용 API 계약
 scripts/                Gateway SSE 회귀 테스트 스크립트
@@ -34,20 +34,20 @@ scripts/                Gateway SSE 회귀 테스트 스크립트
 ## 내부 모듈 구조
 
 ```text
-services/api-gateway/app/main.py      FastAPI route entrypoint
-services/api-gateway/app/dag.py       respond orchestration
-services/api-gateway/app/adapters.py  Classifier/Safety/Retriever/LLM/Speech service adapter boundary
-services/api-gateway/app/request_context.py
+src/gateway-container/api-gateway/app/main.py      FastAPI route entrypoint
+src/gateway-container/api-gateway/app/dag.py       respond orchestration
+src/gateway-container/api-gateway/app/adapters.py  Classifier/Safety/Retriever/LLM/Speech service adapter boundary
+src/gateway-container/api-gateway/app/request_context.py
                                       /v1/respond 입력 정규화 context
-services/api-gateway/app/repositories/session_repository.py
+src/gateway-container/api-gateway/app/repositories/session_repository.py
                                       memory/Cosmos DB session repository boundary
-services/api-gateway/app/payloads.py  SSE/API payload builder
-services/api-gateway/app/turns.py     session turn builder
-services/api-gateway/app/prompts.py   LLM message builder
-services/api-gateway/app/events.py    SSE serialization
-services/api-gateway/app/safety.py    Content Safety + keyword fallback
-services/api-gateway/app/tts.py       TTS payload builder
-services/api-gateway/app/ranking.py   RAG rerank helper
+src/gateway-container/api-gateway/app/payloads.py  SSE/API payload builder
+src/gateway-container/api-gateway/app/turns.py     session turn builder
+src/gateway-container/api-gateway/app/prompts.py   LLM message builder
+src/gateway-container/api-gateway/app/events.py    SSE serialization
+src/gateway-container/api-gateway/app/safety.py    Content Safety + keyword fallback
+src/gateway-container/api-gateway/app/tts.py       TTS payload builder
+src/gateway-container/api-gateway/app/ranking.py   RAG rerank helper
 ```
 
 ## 3차-1 리팩터링 의도
@@ -158,7 +158,7 @@ az acr build \
   -g 10ai_2nd_team3 \
   -r acrregistry001 \
   -t gateway:<tag> \
-  -f services/api-gateway/Dockerfile \
+  -f src/gateway-container/api-gateway/Dockerfile \
   .
 ```
 

@@ -1,18 +1,21 @@
-﻿# Build context excludes
+# Default deny: keep Docker/ACR build context small and stable.
+# The repository root may contain unrelated team folders, but the api-gateway
+# image only needs the whitelisted gateway-container tree below.
+*
+
+# Files Docker may need from the build context.
+!.dockerignore
+
+# api-gateway image inputs. Do not remove unless Dockerfile COPY paths change.
+!src/
+!src/gateway-container/
+!src/gateway-container/api-gateway/
+!src/gateway-container/api-gateway/**
+!src/gateway-container/common/
+!src/gateway-container/common/**
+!src/gateway-container/retrieve/
+!src/gateway-container/retrieve/**
+
+# Always exclude generated Python cache even inside whitelisted folders.
 **/__pycache__/
 **/*.pyc
-.env
-.venv/
-.git/
-
-# Large/unrelated project assets
-cogdist_model_distilled/
-cogdist_model_b8/
-cogdist_multilabel/
-frontend/
-data/
-*.png
-*.jpg
-*.jpeg
-*.pdf
-services/**/smoke_out.txt

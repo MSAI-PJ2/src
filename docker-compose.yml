@@ -1,5 +1,5 @@
-# 로컬 2-컨테이너 통신 검증용 compose (1차 목표).
-# cogdist(내부 분류기) ← api-gateway(외부 오케스트레이터). 모델은 볼륨 마운트(이미지에 굽지 않음).
+# Local two-container smoke-test compose.
+# NOTE: This file expects a local cogdist Dockerfile/model path when running the full stack.
 services:
   cogdist:
     build:
@@ -8,43 +8,40 @@ services:
     container_name: mlnode-cogdist
     environment:
       MODEL_PATH: /models/cogdist
-      MODEL_VERSION: ${MODEL_VERSION:-single-label-12c-distill}   # 모델 교체 시 같이 지정 (예: multi-label-12c-mldistill)
+      MODEL_VERSION: ${MODEL_VERSION:-single-label-12c-distill}
       MAX_LENGTH: "128"
       MAX_BATCH_SIZE: "32"
     volumes:
-      # 로컬=./cogdist_model_distilled / MLnode=COGDIST_MODEL_PATH로 기존 모델 경로 지정. ACA=이미지 bake-in
       - ${COGDIST_MODEL_PATH:-./cogdist_model_distilled}:/models/cogdist:ro
     expose:
-      - "8000"        # 내부 네트워크 전용(게이트웨이가 cogdist:8000 호출). ACA=internal ingress
+      - "8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/readyz').status==200 else 1)"]
       interval: 10s
       timeout: 5s
-      retries: 12          # 모델 로드 30초+ 여유 (콜드스타트)
+      retries: 12
       start_period: 60s
 
   api-gateway:
     build:
       context: .
-      dockerfile: services/api-gateway/Dockerfile
+      dockerfile: src/gateway-container/api-gateway/Dockerfile
     container_name: mlnode-api-gateway
     environment:
       KLUE_API_URL: http://cogdist:8000
       REQUEST_TIMEOUT_SECONDS: "30"
-      API_KEY_REQUIRED: "false"          # 로컬 테스트 프론트(5173) 편의. 운영=true + API_KEY
+      API_KEY_REQUIRED: "false"
       ALLOWED_ORIGINS: "http://127.0.0.1:5173,http://localhost:5173"
-      # 안전 게이트(Azure AI Content Safety). 키는 ~/teamprojectAzure/.env(gitignore)에서 주입
       CONTENT_SAFETY_ENABLED: ${CONTENT_SAFETY_ENABLED:-false}
       CONTENT_SAFETY_ENDPOINT: ${CONTENT_SAFETY_ENDPOINT:-}
       CONTENT_SAFETY_KEY: ${CONTENT_SAFETY_KEY:-}
       CONTENT_SAFETY_THRESHOLD: ${CONTENT_SAFETY_THRESHOLD:-2}
-      # generate 레인 = provider 무관 LLM 클라이언트 (기본: 무료 로컬 Nemotron)
       LLM_PROVIDER: local
       LOCAL_LLM_BASE_URL: http://192.168.1.155:8002/v1
       LOCAL_LLM_MODEL: nemotron-3-super-no-think
       LOCAL_LLM_API_KEY: dummy
     ports:
-      - "${GATEWAY_HOST_PORT:-8080}:8080"   # MLnode는 8080 점유 → GATEWAY_HOST_PORT=18080
+      - "${GATEWAY_HOST_PORT:-8080}:8080"
     depends_on:
       cogdist:
         condition: service_started
