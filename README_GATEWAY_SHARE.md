@@ -5,8 +5,10 @@
 ## 현재 상태
 
 ```text
-Gateway revision: 3차-1 Azure 회귀 테스트 통과 revision
-Git main: 659f91f
+Gateway revision: api-gateway--0000021
+Gateway image: acrregistry001.azurecr.io/gateway:refactor-3-2-service-adapters-20260701
+Git branch: refactor/gateway-3-2-service-adapter-boundary
+Git commit: c6087e4
 Framework: FastAPI + Uvicorn
 Python: 3.11
 LLM: Azure OpenAI gpt-4.1-mini
@@ -15,7 +17,7 @@ Auth: x-api-key required
 Cogdist: cogdistmodel--0000004, Azure Files subPath=v2
 RAG: cbt-rag-search / cbt-rag-index
 Speech: Azure Speech SDK + pydub + ffmpeg 유지
-Status: Azure 회귀 테스트 통과
+Status: refactor 3-2 Azure regression PASS
 ```
 
 ## 포함 항목
@@ -34,6 +36,7 @@ scripts/                Gateway SSE 회귀 테스트 스크립트
 ```text
 services/api-gateway/app/main.py      FastAPI route entrypoint
 services/api-gateway/app/dag.py       respond orchestration
+services/api-gateway/app/adapters.py  Classifier/Safety/Retriever/LLM/Speech service adapter boundary
 services/api-gateway/app/request_context.py
                                       /v1/respond 입력 정규화 context
 services/api-gateway/app/repositories/session_repository.py
@@ -54,6 +57,15 @@ services/api-gateway/app/ranking.py   RAG rerank helper
 현재: repositories/session_repository.py가 기존 in-memory sessions.py를 감싼다.
 다음: Cosmos DB adapter를 추가해도 /v1/respond, /v1/sessions API 계약은 유지한다.
 주의: 이번 단계는 DB 연결이 아니라 교체 가능한 경계 생성이다.
+```
+
+## 3차-2 리팩터링 의도
+
+```text
+목표: dag.py/main.py가 외부 서비스 호출 세부사항에 직접 의존하지 않도록 adapter boundary를 만든다.
+대상: classifier, safety, retriever, LLM, speech STT/TTS
+현재: adapters.py가 기존 구현을 감싸므로 API 계약과 런타임 동작은 유지한다.
+다음: Cosmos DB 연결 전 Gateway orchestration 비대화를 줄인다.
 ```
 
 ## 주요 엔드포인트
@@ -101,8 +113,8 @@ crisis:     meta -> crisis -> done
 서버는 요청값을 그대로 무제한 반영하지 않습니다.
 
 ```text
-기본값: AZURE_OPENAI_MAX_COMPLETION_TOKENS
-상한값: AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT
+기본값: AZURE_OPENAI_MAX_COMPLETION_TOKENS       # MVP 권장 1200
+상한값: AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT # Gateway 권장 상한 12000
 요청값: llm.max_completion_tokens
 실제값: min(요청값, 서버 상한값)
 ```
@@ -110,11 +122,14 @@ crisis:     meta -> crisis -> done
 ## 최근 Azure 검증
 
 ```text
-revision: 3차-1 request context/session repository boundary 배포 revision
+revision: api-gateway--0000021
+image: acrregistry001.azurecr.io/gateway:refactor-3-2-service-adapters-20260701
 healthz: PASS
 auth 401: PASS
 classify: PASS
 respond text: PASS
+long max_completion_tokens: PASS
+short max_completion_tokens: PASS
 session read: PASS
 crisis: PASS
 transcript: PASS

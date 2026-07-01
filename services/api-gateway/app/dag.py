@@ -1,9 +1,7 @@
-﻿import asyncio
-from common.llm_client import LLMClient
-from common.speech_client import transcribe_audio_input_detailed
-from retrieve.client import get_retriever
+import asyncio
 
-from . import clients, crisis
+from . import crisis
+from .adapters import services
 from .events import sse
 from .payloads import (
     INPUT_REQUIRED_STT_MESSAGE,
@@ -21,21 +19,18 @@ from .prompts import build_llm_messages
 from .ranking import rerank
 from .repositories import session_repository
 from .request_context import RespondRequestContext, default_text_input_meta
-from .safety import safety_check
-from .tts import synthesize_tts
 from .turns import assistant_turn, crisis_turn, input_pending_turn, stt_failed_turn, user_turn
 
-_retriever = get_retriever()
 
 
 async def classify(text: str) -> dict:
-    return await clients.classify_one(text)
+    return await services.classifier.classify_one(text)
 
 
 async def retrieve(text: str) -> list[dict]:
     # 연결 구조만: RETRIEVE_PROVIDER=local(stub) / azure(Azure AI Search).
     # 동기 retriever를 스레드로 돌려 gather 동시성을 유지한다.
-    return await asyncio.to_thread(_retriever.retrieve, text)
+    return await services.retriever.retrieve(text)
 
 
 async def stt_then_respond_stream(
@@ -52,7 +47,7 @@ async def stt_then_respond_stream(
 
     yield sse(stt_processing_payload(session_id, context.stt_provider, context.language))
 
-    result = await asyncio.to_thread(transcribe_audio_input_detailed, context.audio)
+    result = await services.speech.transcribe_audio(context.audio)
 
     if result.get("status") != "completed" or not result.get("transcript"):
         session_repository.append_turn(session_id, stt_failed_turn(context.input_meta, result, context.tts))
@@ -104,7 +99,7 @@ async def respond_stream(
     input_meta = default_text_input_meta(input_meta)
 
     safety, cls, cands = await asyncio.gather(
-        safety_check(text),
+        services.safety.check(text),
         classify(text),
         retrieve(text),
     )
@@ -124,7 +119,7 @@ async def respond_stream(
         yield sse(payload)
         session_repository.append_turn(session_id, crisis_turn(payload))
         if tts and tts.get("enabled"):
-            tts_event = await synthesize_tts(payload.get("message", ""), tts)
+            tts_event = await services.speech.synthesize_tts(payload.get("message", ""), tts)
             yield sse(tts_payload(session_id, tts_event))
         yield sse(done_payload(session_id))
         return
@@ -136,7 +131,7 @@ async def respond_stream(
     assistant_parts: list[str] = []
     # NOTE: single-user skeleton: chat_stream is a sync generator; iterating here blocks the loop.
     # For concurrency switch to an async OpenAI client later.
-    for tok in respond_stream._llm.chat_stream(messages, **_llm_options(llm)):
+    for tok in services.llm.chat_stream(messages, llm):
         assistant_parts.append(tok)
         yield sse(token_payload(session_id, tok))
 
@@ -145,29 +140,7 @@ async def respond_stream(
         session_repository.append_turn(session_id, assistant_turn(assistant_text, primary, chunks))
 
     if tts and tts.get("enabled"):
-        tts_event = await synthesize_tts(assistant_text, tts)
+        tts_event = await services.speech.synthesize_tts(assistant_text, tts)
         yield sse(tts_payload(session_id, tts_event))
 
     yield sse(done_payload(session_id))
-
-respond_stream._llm = LLMClient()
-
-
-def _llm_options(options: dict | None) -> dict:
-    """Map request-level LLM options to LLMClient kwargs."""
-    kwargs: dict = {}
-    if not options:
-        return kwargs
-    max_tokens = options.get("max_completion_tokens") or options.get("max_tokens")
-    if max_tokens is not None:
-        try:
-            kwargs["max_tokens"] = int(max_tokens)
-        except (TypeError, ValueError):
-            pass
-    temperature = options.get("temperature")
-    if temperature is not None:
-        try:
-            kwargs["temperature"] = float(temperature)
-        except (TypeError, ValueError):
-            pass
-    return kwargs

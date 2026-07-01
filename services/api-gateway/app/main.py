@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 
-from . import clients, dag, settings
+from . import dag, settings
+from .adapters import services
 from .repositories import session_repository
 from .request_context import RespondRequestContext
 from .schemas import BatchClassifyIn, ClassifyIn, RespondIn, SessionCreateIn
@@ -53,12 +54,12 @@ async def get_session(session_id: str):
 
 @app.post("/v1/classify", dependencies=[Depends(require_key)])
 async def classify(body: ClassifyIn):
-    return await clients.classify_one(body.text, body.threshold)
+    return await services.classifier.classify_one(body.text, body.threshold)
 
 
 @app.post("/v1/batch-classify", dependencies=[Depends(require_key)])
 async def batch_classify(body: BatchClassifyIn):
-    return await clients.classify_batch(body.texts, body.threshold)
+    return await services.classifier.classify_batch(body.texts, body.threshold)
 
 
 @app.post("/v1/respond", dependencies=[Depends(require_key)])
