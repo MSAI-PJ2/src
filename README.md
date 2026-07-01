@@ -10,12 +10,13 @@
 - Safety: Azure AI Content Safety
 - RAG: Azure AI Search `cbt-rag-search` / `cbt-rag-index`
 - LLM: Azure OpenAI `gpt-4.1-mini` Chat Completions
+- LLM length control: `/v1/respond` optional `llm.max_completion_tokens`, server-side capped
 - Speech: Azure Speech SDK + pydub + ffmpeg 방식 유지
 - TTS: SSE `tts` event에서 `audio.data`를 canonical로 사용하고 `audio_base64`는 호환 alias로 제공
 - STT: `audio.kind=url|base64` 지원. `stt` SSE event로 processing/completed/error를 명시
 - Refactor: DAG 보조 로직을 `events.py`, `safety.py`, `tts.py`, `ranking.py`로 분리 완료
 - Refactor 2: `payloads.py`, `turns.py`, `prompts.py`로 SSE payload/session turn/LLM message builder 분리 완료
-- Refactor 3-1 준비: `request_context.py`, `repositories/session_repository.py`로 Cosmos DB 교체 전 입력 정규화/세션 저장소 경계 생성
+- Refactor 3-1: `request_context.py`, `repositories/session_repository.py`로 Cosmos DB 교체 전 입력 정규화/세션 저장소 경계 생성 및 Azure 회귀 테스트 완료
 
 ## 주요 경로
 - `services/api-gateway/app/main.py`: FastAPI entrypoint
@@ -42,8 +43,8 @@
 - 외부 호출은 `x-api-key` 헤더가 필요합니다.
 
 ## 최신 검증
-- main 병합 커밋: `b8b6084 게이트웨이 DAG 보조 로직 모듈 분리 리팩터링 병합`
-- Azure 테스트 revision: `api-gateway--0000016`
+- main 병합 커밋: `659f91f 게이트웨이 request context session repository 리팩터링 병합`
+- Azure 테스트 기준: 3차-1 request context/session repository boundary 배포 후 회귀 테스트
 - Azure 상태: Healthy / Traffic 100
-- 회귀 테스트 PASS: health, auth 401, classify, respond text, crisis, TTS, audio STT success, audio STT failure
+- 회귀 테스트 PASS: health, auth 401, classify, respond text, session read, crisis, transcript, TTS, audio STT success, audio STT failure
 - 로컬 검증: `py_compile` 및 `git diff --check` 통과

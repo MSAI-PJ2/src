@@ -69,7 +69,7 @@ async def respond(body: RespondIn):
         # Keep STT inside the streaming path so clients can receive explicit
         # stt processing/completed/error events instead of a silent fallback.
         return StreamingResponse(
-            dag.stt_then_respond_stream(context.session_id, context.input_meta, context.tts),
+            dag.stt_then_respond_stream(context.session_id, context.input_meta, context.tts, context.llm),
             media_type="text/event-stream",
         )
 
@@ -80,6 +80,6 @@ async def respond(body: RespondIn):
         )
 
     return StreamingResponse(
-        dag.respond_stream(context.text or "", context.session_id, context.input_meta, context.tts),
+        dag.respond_stream(context.text or "", context.session_id, context.input_meta, context.tts, context.llm),
         media_type="text/event-stream",
     )

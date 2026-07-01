@@ -44,6 +44,13 @@ class TtsIn(BaseModel):
     speed: float | None = None
 
 
+class LlmIn(BaseModel):
+    # Optional per-request generation controls. Server-side env limits still
+    # cap these values to prevent accidental cost/latency spikes.
+    max_completion_tokens: int | None = None
+    temperature: float | None = None
+
+
 class RespondIn(BaseModel):
     text: str | None = None
     session_id: str | None = None
@@ -51,6 +58,7 @@ class RespondIn(BaseModel):
     audio: AudioIn | None = None
     stt: SttIn | None = None
     tts: TtsIn | None = None
+    llm: LlmIn | None = None
     client: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
 

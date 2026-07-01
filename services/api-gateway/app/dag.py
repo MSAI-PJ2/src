@@ -42,12 +42,13 @@ async def stt_then_respond_stream(
     session_id: str | None = None,
     input_meta: dict | None = None,
     tts: dict | None = None,
+    llm: dict | None = None,
 ):
     """Transcribe audio, emit STT debug events, then continue the existing DAG."""
-    context = RespondRequestContext(session_id, None, input_meta or {}, tts)
+    context = RespondRequestContext(session_id, None, input_meta or {}, tts, llm)
     session = session_repository.ensure(context.session_id)
     session_id = session["session_id"]
-    context = RespondRequestContext(session_id, context.text, context.input_meta, context.tts)
+    context = RespondRequestContext(session_id, context.text, context.input_meta, context.tts, context.llm)
 
     yield sse(stt_processing_payload(session_id, context.stt_provider, context.language))
 
@@ -69,7 +70,7 @@ async def stt_then_respond_stream(
     context = context.with_transcript(result)
     yield sse(stt_result_payload(session_id, result))
 
-    async for event in respond_stream(context.text or "", session_id, context.input_meta, context.tts):
+    async for event in respond_stream(context.text or "", session_id, context.input_meta, context.tts, context.llm):
         yield event
 
 
@@ -95,6 +96,7 @@ async def respond_stream(
     session_id: str | None = None,
     input_meta: dict | None = None,
     tts: dict | None = None,
+    llm: dict | None = None,
 ):
     session = session_repository.ensure(session_id)
     session_id = session["session_id"]
@@ -134,7 +136,7 @@ async def respond_stream(
     assistant_parts: list[str] = []
     # NOTE: single-user skeleton: chat_stream is a sync generator; iterating here blocks the loop.
     # For concurrency switch to an async OpenAI client later.
-    for tok in respond_stream._llm.chat_stream(messages):
+    for tok in respond_stream._llm.chat_stream(messages, **_llm_options(llm)):
         assistant_parts.append(tok)
         yield sse(token_payload(session_id, tok))
 
@@ -149,3 +151,23 @@ async def respond_stream(
     yield sse(done_payload(session_id))
 
 respond_stream._llm = LLMClient()
+
+
+def _llm_options(options: dict | None) -> dict:
+    """Map request-level LLM options to LLMClient kwargs."""
+    kwargs: dict = {}
+    if not options:
+        return kwargs
+    max_tokens = options.get("max_completion_tokens") or options.get("max_tokens")
+    if max_tokens is not None:
+        try:
+            kwargs["max_tokens"] = int(max_tokens)
+        except (TypeError, ValueError):
+            pass
+    temperature = options.get("temperature")
+    if temperature is not None:
+        try:
+            kwargs["temperature"] = float(temperature)
+        except (TypeError, ValueError):
+            pass
+    return kwargs

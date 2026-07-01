@@ -41,6 +41,9 @@ def main() -> int:
         "session_id": os.environ.get("TEST_SESSION_ID", "api-contract-text-1"),
         "text": os.environ.get("TEST_TEXT", "사람들 앞에 서면 다 망칠 것 같아요"),
     }
+    max_completion_tokens = os.environ.get("TEST_MAX_COMPLETION_TOKENS")
+    if max_completion_tokens:
+        payload["llm"] = {"max_completion_tokens": int(max_completion_tokens)}
 
     req = urllib.request.Request(
         url,

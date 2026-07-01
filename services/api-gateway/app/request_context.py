@@ -23,6 +23,7 @@ class RespondRequestContext:
     text: str | None
     input_meta: dict[str, Any]
     tts: dict[str, Any] | None = None
+    llm: dict[str, Any] | None = None
 
     @classmethod
     def from_body(cls, body: RespondIn) -> "RespondRequestContext":
@@ -31,6 +32,7 @@ class RespondRequestContext:
             text=body.effective_text(),
             input_meta=body.input_meta(),
             tts=body.tts.model_dump(exclude_none=True) if body.tts else None,
+            llm=body.llm.model_dump(exclude_none=True) if body.llm else None,
         )
 
     @property
@@ -78,6 +80,7 @@ class RespondRequestContext:
             text=result.get("transcript"),
             input_meta=input_meta,
             tts=self.tts,
+            llm=self.llm,
         )
 
 

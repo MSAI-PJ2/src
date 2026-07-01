@@ -130,11 +130,46 @@ class LLMClient:
                     pieces.append(content["text"])
         return "".join(pieces)
 
-    def _responses_create(self, messages, *, temperature=1.0, max_tokens=900) -> str:
+    @staticmethod
+    def _int_env(name: str) -> int | None:
+        raw = os.getenv(name)
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _positive_int(value: int | None, fallback: int) -> int:
+        if value is None:
+            return fallback
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return max(1, value)
+
+    def _completion_token_limit(self, requested: int | None, fallback: int) -> int:
+        """Resolve per-request token cap with server-side safety bounds.
+
+        AZURE_OPENAI_MAX_COMPLETION_TOKENS is the default. The same value is
+        also the default upper bound unless AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT
+        is set. Request-level values can lower the cap or raise it only up to
+        the server-side bound.
+        """
+        env_default = self._int_env("AZURE_OPENAI_MAX_COMPLETION_TOKENS") or self._int_env("LLM_MAX_COMPLETION_TOKENS")
+        default = self._positive_int(env_default, fallback)
+        desired = self._positive_int(requested, default) if requested is not None else default
+        upper = self._int_env("AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT") or env_default or fallback
+        return min(desired, self._positive_int(upper, default))
+
+    def _responses_create(self, messages, *, temperature=1.0, max_tokens: int | None = None) -> str:
+        token_limit = self._completion_token_limit(max_tokens, 900)
         payload = {
             "model": self.model,
             "input": self._messages_to_responses_input(messages),
-            "max_output_tokens": max_tokens,
+            "max_output_tokens": token_limit,
         }
         # GPT-5 deployments often default to temperature=1; omit temperature unless explicitly non-None.
         if temperature is not None:
@@ -148,22 +183,7 @@ class LLMClient:
             resp.raise_for_status()
             return self._extract_responses_text(resp.json())
 
-    def _azure_completion_token_limit(self, fallback: int) -> int:
-        """Token cap for Azure Chat Completions.
-
-        GPT-4.1 family Azure samples use `max_completion_tokens`, not legacy
-        `max_tokens`. Keep the caller fallback for older deployments, but allow
-        the Container App env to raise the cap without another image rebuild.
-        """
-        raw = os.getenv("AZURE_OPENAI_MAX_COMPLETION_TOKENS") or os.getenv("LLM_MAX_COMPLETION_TOKENS")
-        if not raw:
-            return fallback
-        try:
-            return int(raw)
-        except ValueError:
-            return fallback
-
-    def _azure_chat_kwargs(self, messages, *, temperature=0.0, max_tokens=900, stream=False) -> dict:
+    def _azure_chat_kwargs(self, messages, *, temperature=0.0, max_tokens: int | None = None, stream=False) -> dict:
         kwargs = {
             "model": self.model,
             "messages": messages,
@@ -171,39 +191,41 @@ class LLMClient:
             "top_p": float(os.getenv("AZURE_OPENAI_TOP_P", "1.0")),
             "frequency_penalty": float(os.getenv("AZURE_OPENAI_FREQUENCY_PENALTY", "0.0")),
             "presence_penalty": float(os.getenv("AZURE_OPENAI_PRESENCE_PENALTY", "0.0")),
-            "max_completion_tokens": self._azure_completion_token_limit(max_tokens),
+            "max_completion_tokens": self._completion_token_limit(max_tokens, 900),
         }
         if stream:
             kwargs["stream"] = True
         return kwargs
 
-    def chat(self, messages, *, temperature=0.0, max_tokens=900) -> str:
+    def chat(self, messages, *, temperature=0.0, max_tokens: int | None = None) -> str:
+        token_limit = self._completion_token_limit(max_tokens, 900)
         if self.provider == "azure_responses":
-            return self._responses_create(messages, temperature=1.0, max_tokens=max_tokens)
+            return self._responses_create(messages, temperature=1.0, max_tokens=token_limit)
         if self.provider in {"azure", "azure_model_router"}:
             resp = self.client.chat.completions.create(
-                **self._azure_chat_kwargs(messages, temperature=temperature, max_tokens=max_tokens)
+                **self._azure_chat_kwargs(messages, temperature=temperature, max_tokens=token_limit)
             )
         else:
             resp = self.client.chat.completions.create(
-                model=self.model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+                model=self.model, messages=messages, temperature=temperature, max_tokens=token_limit,
             )
         return resp.choices[0].message.content or ""
 
-    def chat_stream(self, messages, *, temperature=0.0, max_tokens=900):
+    def chat_stream(self, messages, *, temperature=0.0, max_tokens: int | None = None):
+        token_limit = self._completion_token_limit(max_tokens, 900)
         if self.provider == "azure_responses":
             # Non-streaming smoke path: yield once so existing SSE code still works.
-            text = self._responses_create(messages, temperature=1.0, max_tokens=max_tokens)
+            text = self._responses_create(messages, temperature=1.0, max_tokens=token_limit)
             if text:
                 yield text
             return
         if self.provider in {"azure", "azure_model_router"}:
             stream = self.client.chat.completions.create(
-                **self._azure_chat_kwargs(messages, temperature=temperature, max_tokens=max_tokens, stream=True)
+                **self._azure_chat_kwargs(messages, temperature=temperature, max_tokens=token_limit, stream=True)
             )
         else:
             stream = self.client.chat.completions.create(
-                model=self.model, messages=messages, temperature=temperature, max_tokens=max_tokens, stream=True,
+                model=self.model, messages=messages, temperature=temperature, max_tokens=token_limit, stream=True,
             )
         for chunk in stream:
             if not chunk.choices:

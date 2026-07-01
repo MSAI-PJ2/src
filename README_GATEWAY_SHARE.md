@@ -5,12 +5,12 @@
 ## 현재 상태
 
 ```text
-Gateway revision: api-gateway--0000016
-Git main: b8b6084
+Gateway revision: 3차-1 Azure 회귀 테스트 통과 revision
+Git main: 659f91f
 Framework: FastAPI + Uvicorn
 Python: 3.11
 LLM: Azure OpenAI gpt-4.1-mini
-LLM token parameter: max_completion_tokens via AZURE_OPENAI_MAX_COMPLETION_TOKENS=4096
+LLM token parameter: request llm.max_completion_tokens, capped by AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT
 Auth: x-api-key required
 Cogdist: cogdistmodel--0000004, Azure Files subPath=v2
 RAG: cbt-rag-search / cbt-rag-index
@@ -84,15 +84,40 @@ crisis:     meta -> crisis -> done
 
 상세 계약은 `API_CONTRACT.md`를 기준으로 합니다.
 
+## LLM 응답 길이 제어
+
+`/v1/respond` 요청 body에 선택적으로 `llm.max_completion_tokens`를 넣을 수 있습니다.
+
+```json
+{
+  "session_id": "long-answer-test-1",
+  "text": "사람들 앞에 서면 다 망칠 것 같아요",
+  "llm": {
+    "max_completion_tokens": 2048
+  }
+}
+```
+
+서버는 요청값을 그대로 무제한 반영하지 않습니다.
+
+```text
+기본값: AZURE_OPENAI_MAX_COMPLETION_TOKENS
+상한값: AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT
+요청값: llm.max_completion_tokens
+실제값: min(요청값, 서버 상한값)
+```
+
 ## 최근 Azure 검증
 
 ```text
-revision: api-gateway--0000016
+revision: 3차-1 request context/session repository boundary 배포 revision
 healthz: PASS
 auth 401: PASS
 classify: PASS
 respond text: PASS
+session read: PASS
 crisis: PASS
+transcript: PASS
 TTS: PASS
 audio STT success: PASS
 audio STT failure: PASS
