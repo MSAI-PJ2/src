@@ -34,6 +34,7 @@ scripts/                Gateway SSE 회귀 테스트 스크립트
 ```text
 services/api-gateway/app/main.py      FastAPI route entrypoint
 services/api-gateway/app/dag.py       respond orchestration
+services/api-gateway/app/adapters.py  Classifier/Safety/Retriever/LLM/Speech service adapter boundary
 services/api-gateway/app/request_context.py
                                       /v1/respond 입력 정규화 context
 services/api-gateway/app/repositories/session_repository.py
@@ -54,6 +55,15 @@ services/api-gateway/app/ranking.py   RAG rerank helper
 현재: repositories/session_repository.py가 기존 in-memory sessions.py를 감싼다.
 다음: Cosmos DB adapter를 추가해도 /v1/respond, /v1/sessions API 계약은 유지한다.
 주의: 이번 단계는 DB 연결이 아니라 교체 가능한 경계 생성이다.
+```
+
+## 3차-2 리팩터링 의도
+
+```text
+목표: dag.py/main.py가 외부 서비스 호출 세부사항에 직접 의존하지 않도록 adapter boundary를 만든다.
+대상: classifier, safety, retriever, LLM, speech STT/TTS
+현재: adapters.py가 기존 구현을 감싸므로 API 계약과 런타임 동작은 유지한다.
+다음: Cosmos DB 연결 전 Gateway orchestration 비대화를 줄인다.
 ```
 
 ## 주요 엔드포인트

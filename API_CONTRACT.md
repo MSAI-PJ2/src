@@ -38,6 +38,7 @@ audio STT failure PASS
 ```text
 services/api-gateway/app/main.py      FastAPI route entrypoint
 services/api-gateway/app/dag.py       respond orchestration / STT to DAG flow
+services/api-gateway/app/adapters.py  external service adapter boundary
 services/api-gateway/app/events.py    SSE serialization
 services/api-gateway/app/safety.py    Azure Content Safety + keyword fallback
 services/api-gateway/app/tts.py       TTS SSE payload builder
@@ -49,6 +50,7 @@ services/common/speech_client.py      Azure Speech STT/TTS client
 
 ```text
 - dag.py는 요청 orchestration 중심으로 유지한다.
+- adapters.py는 classifier/safety/retriever/LLM/speech 외부 서비스 호출 경계를 담당한다.
 - safety/tts/ranking/events는 독립 보조 모듈로 분리되어 있다.
 - API 계약은 SSE event type과 payload field를 기준으로 유지한다.
 - 내부 모듈 분리는 프론트 호출 계약을 바꾸지 않는다.
