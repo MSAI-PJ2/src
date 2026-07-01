@@ -194,8 +194,8 @@ llm.temperature:
 서버 적용 규칙:
 
 ```text
-기본값: AZURE_OPENAI_MAX_COMPLETION_TOKENS
-상한값: AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT
+기본값: AZURE_OPENAI_MAX_COMPLETION_TOKENS       # MVP 권장 1200
+상한값: AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT # Gateway 권장 상한 12000
 요청값: llm.max_completion_tokens
 최종 적용값: min(요청값 또는 기본값, 상한값)
 ```

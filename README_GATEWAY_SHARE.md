@@ -101,8 +101,8 @@ crisis:     meta -> crisis -> done
 서버는 요청값을 그대로 무제한 반영하지 않습니다.
 
 ```text
-기본값: AZURE_OPENAI_MAX_COMPLETION_TOKENS
-상한값: AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT
+기본값: AZURE_OPENAI_MAX_COMPLETION_TOKENS       # MVP 권장 1200
+상한값: AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT # Gateway 권장 상한 12000
 요청값: llm.max_completion_tokens
 실제값: min(요청값, 서버 상한값)
 ```
