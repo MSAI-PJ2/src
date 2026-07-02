@@ -22,7 +22,7 @@ REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
 # API_KEY_REQUIRED=true 면 모든 /v1 요청에 x-api-key 헤더가 있어야 한다
 API_KEY = os.getenv("API_KEY", "")
 API_KEY_REQUIRED = _bool("API_KEY_REQUIRED", False)
-# AUTH_MODE: api_key(현행) | entra(로그인 도입 예정 — auth.py 의 가이드 참고)
+# AUTH_MODE: api_key(현행) | entra(로그인 도입 예정 — api/v1.py 구획 2 가이드 참고)
 AUTH_MODE = os.getenv("AUTH_MODE", "api_key").strip().lower()
 # 브라우저에서 이 서버를 호출할 수 있는 프론트엔드 주소 목록 (쉼표 구분)
 ALLOWED_ORIGINS = [
@@ -41,7 +41,7 @@ CONTENT_SAFETY_TIMEOUT = float(os.getenv("CONTENT_SAFETY_TIMEOUT", "5"))
 
 # --- RAG: 검색된 참고자료 중 프롬프트에 넣을 문서 개수 ---
 RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "4"))
-# 라벨 일치 문서 가산점의 크기와 발동 조건 (기본값 = 현행 동작, ranking.py 참고)
+# 라벨 일치 문서 가산점의 크기와 발동 조건 (기본값 = 현행 동작, counsel/flow.py 구획 3 참고)
 RERANK_BIAS_WEIGHT = float(os.getenv("RERANK_BIAS_WEIGHT", "0.3"))
 RERANK_BIAS_MIN_CONFIDENCE = float(os.getenv("RERANK_BIAS_MIN_CONFIDENCE", "0.5"))
 # 발동 판정 기준: score(확신 점수 — 단일라벨 softmax 기준, 현행)

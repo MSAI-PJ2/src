@@ -175,7 +175,7 @@ def test_api_key_required(gateway, monkeypatch):
 
 
 def test_auth_mode_entra_fails_fast(gateway, monkeypatch):
-    """AUTH_MODE=entra 는 구현 전까지 501 로 명시적으로 실패해야 한다 (auth.py)."""
+    """AUTH_MODE=entra 는 구현 전까지 501 로 명시적으로 실패해야 한다 (api/v1.py 구획 2)."""
     client, _ = gateway
     from app import settings
     monkeypatch.setattr(settings, "AUTH_MODE", "entra")

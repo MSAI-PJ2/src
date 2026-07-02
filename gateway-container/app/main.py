@@ -1,10 +1,11 @@
 """[진입점] 서버가 시작될 때 가장 먼저 실행되는 파일.
 
 Dockerfile 의 `uvicorn app.main:app` 이 이 파일의 `app` 객체(FastAPI 서버)를 띄운다.
-여기서는 서버를 만들고 공통 설정(CORS, 요청ID)과 URL 목록(api.py)을 연결만 한다.
+여기서는 서버를 만들고 공통 설정(CORS, 요청ID)과 URL 목록(api/v1.py)을 연결만 한다.
 "무엇을 응답할지"의 실제 내용은 전부 다른 파일에 있다:
-    URL 목록          → api.py
-    상담 응답 흐름    → respond_flow.py
+    URL 목록·인증·요청모양  → api/v1.py
+    상담 흐름(기계장치)     → counsel/flow.py
+    정책·프롬프트(사람편집) → counsel/policy.py
 """
 import logging
 import os
@@ -14,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import settings
-from .api import router
+from .api.v1 import router
 
 # Azure 모니터링(App Insights) 연결 — 연결 문자열 env 가 있는 배포 환경에서만 켜진다.
 # 로컬 PC 에는 env 가 없으므로 이 블록은 그냥 건너뛰고, 서버는 정상 기동한다.

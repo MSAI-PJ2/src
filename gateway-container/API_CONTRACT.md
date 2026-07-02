@@ -7,7 +7,7 @@
 ```text
 Repository: https://github.com/MSAI-PJ2/src.git
 Gateway folder: gateway-container/
-Gateway source layout: gateway-container/services/{api-gateway,common,retrieve} + gateway-container/scripts
+Gateway source layout: gateway-container/app/{api,counsel,services} + tests + scripts (평탄화 구조)
 Gateway base URL: https://api-gateway.icybush-95bf9b25.koreacentral.azurecontainerapps.io
 Auth: x-api-key 임시 필수
 Runtime: FastAPI + Uvicorn
@@ -20,7 +20,7 @@ RAG: Azure AI Search / cbt-rag-index
 LLM: Azure OpenAI / gpt-4.1-mini
 Speech: Azure Speech STT/TTS + pydub + ffmpeg
 Session store: Azure Cosmos DB NoSQL
-Document Intelligence: 환경변수 예시만 반영, Gateway API 연결은 별도 구현 예정
+Document Intelligence: 채팅 캡쳐 이미지 입력(input_type=image)으로 Gateway 연결됨 (19장)
 ```
 
 검증 상태:
@@ -150,6 +150,21 @@ selected: threshold 기준으로 선택된 라벨 여부.
 - 모델 교체 후 primary 값은 바뀔 수 있다.
 - 프론트엔드는 특정 라벨명을 하드코딩하지 말고 primary/labels 구조를 기준으로 처리한다.
 ```
+
+### 정규화(normalize) 책임 — 자주 나오는 질문
+
+과거 게이트웨이에는 `normalize_classify_result` 함수가 있어 여러 프로토타입 분류기의
+응답 형태(primary_label/top_label/predictions 등)를 받아 정규화했다.
+**지금은 그 역할이 분류기 서버로 이동했다:**
+
+```text
+정규화(canonical 형태 만들기)  → cogdist 서버 (services/cogdist app/model.py 의 _score_one)
+게이트웨이                     → 위 응답 구조를 검증(strict)만 한다 (app/services/classifier.py)
+```
+
+따라서 새 분류 모델을 연결하려면 모델 서버가 위 "응답 구조"를 그대로 내보내야 한다
+(필수: `primary` 문자열 + `labels` 12개 [{label, score, selected}]). 게이트웨이는
+다른 형태를 받아주지 않는다 — 형태가 다르면 게이트웨이가 아니라 분류기 서버를 고친다.
 
 ## 6. Batch Classify
 

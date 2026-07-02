@@ -11,7 +11,7 @@
     5. 턴 빌더                      DB 에 저장하는 턴의 형태 (SSE 이벤트와 별개)
     6. session_repository 싱글톤    SESSION_REPOSITORY 환경변수로 구현 선택
 
-Entra 로그인 도입 시(auth.py 가이드) 세션 문서에 user_id 를 넣어
+Entra 로그인 도입 시(api/v1.py 구획 2 가이드) 세션 문서에 user_id 를 넣어
 "내 세션만 접근"을 이 계층에서 보장한다.
 """
 from __future__ import annotations
@@ -302,7 +302,7 @@ class CosmosSessionRepository:
 # ---------------------------------------------------------------------------
 # 턴 빌더 — DB 에 저장하는 대화 기록 한 건의 형태.
 # role = 발화 주체("user"/"assistant"), event = 어떤 상황의 기록인지.
-# SSE 이벤트(events.py)와는 별개의 "보관용" 형식. 필드를 바꾸면
+# SSE 이벤트(counsel/flow.py 구획 1)와는 별개의 "보관용" 형식. 필드를 바꾸면
 # GET /v1/sessions 응답이 바뀌므로 API_CONTRACT.md 를 함께 갱신한다.
 # ---------------------------------------------------------------------------
 
