@@ -8,8 +8,10 @@
 참고 — 함수 앞의 async: "비동기 함수". 한 요청이 Azure 응답을 기다리는 동안에도
 서버가 다른 요청을 처리할 수 있게 해 준다. await = "결과가 올 때까지 이 요청만 대기".
 """
+import asyncio
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -135,10 +137,14 @@ class SessionCreateIn(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# [구획 2] 인증 — "이 요청을 처리해도 되는가". 현행 = x-api-key 헤더 검사.
+# [구획 2] 인증 — "이 요청을 처리해도 되는가"
 #
-# 아래 [구획 3]의 모든 /v1 주소가 두 함수를 통과해야 실행된다 (Depends 의존성).
-# 로그인(Entra) 도입 시에도 라우트는 그대로 두고 이 구획만 고치면 된다.
+# 아래 [구획 3]의 모든 /v1 주소가 require_api_key + current_user 를 통과해야 실행된다.
+# 두 가지 모드를 환경변수 AUTH_MODE 로 고른다:
+#   api_key(기본)  x-api-key 헤더 검사, current_user 는 "anonymous"
+#   entra          Microsoft Entra External ID 의 JWT(Bearer) 검증 → user_id 반환
+# entra 코드는 이미 구현돼 있고 잠들어 있다 — 아래 4개 환경변수만 채우고
+# AUTH_MODE=entra 로 바꾸면 즉시 게이트로 작동한다 (.env.example 참고).
 # ══════════════════════════════════════════════════════════════════════════
 
 async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -146,45 +152,92 @@ async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
 
     Header(default=None) = 요청 헤더에서 x-api-key 값을 꺼내 매개변수로 받는다는 뜻.
     키가 틀리면 401(인증 실패)을 던져서 요청 처리가 여기서 멈춘다.
+    entra 모드로 넘어가면 require_api_key 는 서버-서버 내부 호출용으로만 남기거나 제거한다.
     """
     if settings.API_KEY_REQUIRED and x_api_key != settings.API_KEY:
         raise HTTPException(401, "invalid api key")
 
 
-async def current_user(authorization: str | None = Header(default=None)) -> str:
-    """요청한 사용자가 누구인지(user_id)를 반환. 현재는 로그인이 없어 항상 "anonymous".
+class EntraTokenVerifier:
+    """Microsoft Entra External ID(OIDC) JWT 검증기.
 
-    ── [사람 작업 가이드] Microsoft Entra External ID(OIDC) 로그인 연동 ─────────
-    흐름: 프론트가 Entra 로 로그인 → JWT(신원 증명 토큰) 발급 → 요청마다
-          Authorization: Bearer <토큰> 첨부 → 이 함수가 토큰을 검증하고 user_id 추출.
-    1. Entra 테넌트에 앱 등록 후 환경변수 준비:
-         ENTRA_TENANT_ID   테넌트 GUID
-         ENTRA_CLIENT_ID   이 API 앱 등록의 client id (토큰의 aud 와 일치해야 함)
-         ENTRA_ISSUER      https://{테넌트GUID}.ciamlogin.com/{테넌트GUID}/v2.0
-         ※ 서브도메인도 테넌트 '이름'이 아니라 GUID — 토큰의 iss 클레임과
-           글자 단위로 같아야 검증을 통과한다.
-    2. requirements.txt 에 PyJWT[crypto] 추가
-    3. 이 함수에서:
-       - authorization 헤더에서 "Bearer " 뒤의 토큰을 꺼낸다 (없으면 401)
-       - 서명키(JWKS) 주소는 하드코딩하지 말고 OIDC 메타데이터에서 읽는다:
-           GET {ENTRA_ISSUER}/.well-known/openid-configuration → 응답의 jwks_uri
-         (issuer 뒤에 /discovery/v2.0/keys 를 그대로 붙이면 404 가 난다)
-       - jwt.PyJWKClient(jwks_uri) 는 모듈 전역에 1회만 생성 (요청마다 생성 금지)
-       - jwt.decode(token, key, algorithms=["RS256"],
-                    audience=ENTRA_CLIENT_ID, issuer=ENTRA_ISSUER)
-       - 검증 실패 → HTTPException(401) / 성공 → claims["oid"] 반환
-    4. 환경변수 AUTH_MODE=entra 로 전환 — 라우트에 이미 의존성으로 걸려 있어서
-       구현 전에는 아래 501 로 즉시 실패하고, 구현 후에는 자동으로 활성화된다.
-       user_id 를 세션과 연결하려면 라우트에서 user_id: str = Depends(current_user) 로
-       받아 흐름에 전달하고, 세션 저장/조회 조건에 포함시켜
-       "내 세션만 접근"을 보장한다 (session.py 참고).
-    5. require_api_key 는 서버 간 내부 호출용으로만 남기거나 제거.
+    JWKS(서명키) 주소는 하드코딩하지 않고 OIDC 메타데이터에서 읽는다
+    (issuer 뒤에 /discovery/v2.0/keys 를 그대로 붙이면 404 가 나는 함정 회피).
+    PyJWKClient 가 서명키를 캐시하므로 매 요청 네트워크 호출이 없다.
+    무거운 의존성(PyJWT)은 이 클래스가 실제로 만들어질 때만 import 한다
+    → api_key 모드에서는 PyJWT 가 없어도 서버가 뜬다.
+    """
+
+    def __init__(self) -> None:
+        import jwt  # PyJWT[crypto] — entra 모드에서만 필요
+
+        self._jwt = jwt
+        tenant = settings.ENTRA_TENANT_ID
+        self.audience = settings.ENTRA_CLIENT_ID
+        # issuer 를 안 주면 테넌트 GUID 로 CIAM 기본 형태를 만든다 (필요 시 명시 override)
+        self.issuer = settings.ENTRA_ISSUER or (
+            f"https://{tenant}.ciamlogin.com/{tenant}/v2.0" if tenant else "")
+        missing = [n for n, v in {"ENTRA_CLIENT_ID": self.audience,
+                                  "ENTRA_ISSUER(or ENTRA_TENANT_ID)": self.issuer}.items() if not v]
+        if missing:
+            raise ValueError("entra auth missing env vars: " + ", ".join(missing))
+
+        # OIDC 메타데이터에서 jwks_uri 를 읽어 서명키 클라이언트를 1회 생성
+        meta_url = self.issuer.rstrip("/") + "/.well-known/openid-configuration"
+        jwks_uri = httpx.get(meta_url, timeout=10).raise_for_status().json()["jwks_uri"]
+        self._jwks = jwt.PyJWKClient(jwks_uri)
+
+    def verify(self, token: str) -> str:
+        """토큰 서명·issuer·audience·만료를 검증하고 user_id(oid 우선, 없으면 sub)를 반환."""
+        signing_key = self._jwks.get_signing_key_from_jwt(token).key
+        claims = self._jwt.decode(token, signing_key, algorithms=["RS256"],
+                                  audience=self.audience, issuer=self.issuer)
+        return claims.get("oid") or claims.get("sub") or "unknown"
+
+
+_verifier: EntraTokenVerifier | None = None
+
+
+def _get_verifier() -> EntraTokenVerifier:
+    """검증기를 첫 entra 요청 때 1회 생성해 재사용 (테스트는 이 전역을 가짜로 교체)."""
+    global _verifier
+    if _verifier is None:
+        _verifier = EntraTokenVerifier()
+    return _verifier
+
+
+def _bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer token")
+    return authorization.split(" ", 1)[1].strip()
+
+
+async def current_user(authorization: str | None = Header(default=None)) -> str:
+    """요청한 사용자의 user_id 를 반환. api_key 모드에서는 로그인이 없어 "anonymous".
+
+    entra 모드: Authorization: Bearer <JWT> 를 검증해 user_id(oid) 를 돌려준다.
+    검증(서명·issuer·audience·만료)은 블로킹이라 to_thread 로 오프로딩한다.
+
+    ── [남은 작업 — 세션을 user_id 로 스코프] ──────────────────────────────
+    인증 게이트(유효 토큰 없으면 접근 차단)는 이 함수로 이미 완성이다. 여기에 더해
+    "내 세션만 접근"까지 원하면: [구획 3]의 respond/sessions 라우트에서
+    user_id: str = Depends(current_user) 로 값을 받아 흐름·세션 저장/조회 조건에
+    포함하면 된다 (session.py 의 저장소가 user_id 필드를 받도록 확장 — 데이터 모델
+    변경이라 기존 익명 세션과의 호환을 정하고 진행).
     ─────────────────────────────────────────────────────────────────────
     """
-    if settings.AUTH_MODE == "entra":
-        # 구현 전에 실수로 entra 를 켜면 조용히 익명으로 동작하는 대신 명확히 실패시킨다
-        raise HTTPException(501, "AUTH_MODE=entra is not implemented yet (see app/api/v1.py)")
-    return "anonymous"
+    if settings.AUTH_MODE != "entra":
+        return "anonymous"
+
+    token = _bearer_token(authorization)  # 없으면 401
+    try:
+        verifier = _get_verifier()        # 설정 누락이면 ValueError → 500(서버 오설정)
+    except ValueError as exc:
+        raise HTTPException(500, f"entra auth misconfigured: {exc}")
+    try:
+        return await asyncio.to_thread(verifier.verify, token)
+    except Exception:                     # 서명 불일치·만료·aud/iss 불일치 등
+        raise HTTPException(401, "invalid or expired token")
 
 
 # ══════════════════════════════════════════════════════════════════════════

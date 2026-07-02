@@ -22,8 +22,12 @@ REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
 # API_KEY_REQUIRED=true 면 모든 /v1 요청에 x-api-key 헤더가 있어야 한다
 API_KEY = os.getenv("API_KEY", "")
 API_KEY_REQUIRED = _bool("API_KEY_REQUIRED", False)
-# AUTH_MODE: api_key(현행) | entra(로그인 도입 예정 — api/v1.py 구획 2 가이드 참고)
+# AUTH_MODE: api_key(현행) | entra(아래 ENTRA_* 3개만 채우면 즉시 켜짐 — api/v1.py 구획 2)
 AUTH_MODE = os.getenv("AUTH_MODE", "api_key").strip().lower()
+# Microsoft Entra External ID (AUTH_MODE=entra 일 때만 사용)
+ENTRA_TENANT_ID = os.getenv("ENTRA_TENANT_ID", "")   # 테넌트 GUID (ISSUER 생략 시 여기서 유도)
+ENTRA_CLIENT_ID = os.getenv("ENTRA_CLIENT_ID", "")   # 이 API 앱 등록의 client id (토큰 aud)
+ENTRA_ISSUER = os.getenv("ENTRA_ISSUER", "")         # 예: https://{테넌트GUID}.ciamlogin.com/{테넌트GUID}/v2.0
 # 브라우저에서 이 서버를 호출할 수 있는 프론트엔드 주소 목록 (쉼표 구분)
 ALLOWED_ORIGINS = [
     origin.strip()

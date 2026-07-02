@@ -174,12 +174,56 @@ def test_api_key_required(gateway, monkeypatch):
     assert ok.status_code == 200 and ok.json()["primary"] == CLS_RESULT["primary"]
 
 
-def test_auth_mode_entra_fails_fast(gateway, monkeypatch):
-    """AUTH_MODE=entra 는 구현 전까지 501 로 명시적으로 실패해야 한다 (api/v1.py 구획 2)."""
+class _FakeVerifier:
+    """Entra JWT 검증기 대역 — 네트워크·PyJWT 없이 토큰 게이트만 검증."""
+    def verify(self, token):
+        if token == "good-token":
+            return "user-abc-123"
+        raise ValueError("bad token")
+
+
+def _enable_entra(monkeypatch):
+    from app import settings
+    from app.api import v1
+    monkeypatch.setattr(settings, "AUTH_MODE", "entra")
+    monkeypatch.setattr(v1, "_verifier", _FakeVerifier())  # 실제 검증기 생성 차단
+
+
+def test_entra_valid_token_passes(gateway, monkeypatch):
+    client, _ = gateway
+    _enable_entra(monkeypatch)
+    r = client.post("/v1/classify", json={"text": "x"},
+                    headers={"Authorization": "Bearer good-token"})
+    assert r.status_code == 200 and r.json()["primary"] == CLS_RESULT["primary"]
+
+
+def test_entra_missing_token_401(gateway, monkeypatch):
+    client, _ = gateway
+    _enable_entra(monkeypatch)
+    assert client.post("/v1/classify", json={"text": "x"}).status_code == 401
+
+
+def test_entra_bad_token_401(gateway, monkeypatch):
+    client, _ = gateway
+    _enable_entra(monkeypatch)
+    r = client.post("/v1/classify", json={"text": "x"},
+                    headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+
+
+def test_entra_misconfigured_500(gateway, monkeypatch):
+    """AUTH_MODE=entra 인데 ENTRA_* 설정이 없으면 500(서버 오설정)으로 명확히 실패."""
     client, _ = gateway
     from app import settings
+    from app.api import v1
     monkeypatch.setattr(settings, "AUTH_MODE", "entra")
-    assert client.post("/v1/classify", json={"text": "x"}).status_code == 501
+    monkeypatch.setattr(v1, "_verifier", None)           # 실제 생성 경로로
+    monkeypatch.setattr(settings, "ENTRA_CLIENT_ID", "")
+    monkeypatch.setattr(settings, "ENTRA_ISSUER", "")
+    monkeypatch.setattr(settings, "ENTRA_TENANT_ID", "")
+    r = client.post("/v1/classify", json={"text": "x"},
+                    headers={"Authorization": "Bearer any"})
+    assert r.status_code == 500
 
 
 def test_batch_classify(gateway):
