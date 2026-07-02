@@ -108,7 +108,9 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
 
     # 5) 참고자료 정렬 → 프롬프트 구성 → LLM 스트리밍
     #    정책이 RAG 를 끄면(chunks=[]) 참고자료 없이 답변한다
-    chunks = rerank(cands, primary, confidence, top_n=policy.rag_top_n) if policy.use_rag else []
+    #    cls_labels: multi_label 모델의 selected 판정을 가산점 조건으로 쓸 수 있게 전달
+    chunks = rerank(cands, primary, confidence, top_n=policy.rag_top_n,
+                    cls_labels=cls["labels"]) if policy.use_rag else []
     yield sse(chunks_event(session_id, chunks))
 
     # 시스템 프롬프트(상담 스타일·라벨 지침) + 이전 대화 + 이번 발화 → LLM 입력 메시지
@@ -119,11 +121,13 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
         assistant_parts.append(tok)
         yield sse(token_event(session_id, tok))
 
-    # 조각들을 합쳐 완성된 답변을 만들고, 어떤 정책으로 생성했는지와 함께 저장
+    # 조각들을 합쳐 완성된 답변을 만들고, 어떤 정책·확신으로 생성했는지와 함께 저장
+    # (confidence 를 남겨야 운영 후 "저확신 강등이 몇 번 일어났나"를 DB 에서 집계할 수 있다)
     assistant_text = "".join(assistant_parts).strip()
     if assistant_text:
+        policy_meta = {**policy.as_metadata(), "confidence": round(confidence, 4)}
         await session_repository.append_turn(
-            session_id, assistant_turn(assistant_text, primary, chunks, policy=policy.as_metadata()))
+            session_id, assistant_turn(assistant_text, primary, chunks, policy=policy_meta))
 
     # 6) (옵션) 음성 합성 — 문장이 완성된 뒤에 해야 자연스러워서 스트리밍이 끝난 후 수행
     if tts and tts.get("enabled"):

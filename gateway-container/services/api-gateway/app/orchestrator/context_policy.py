@@ -13,6 +13,8 @@ prompt_strategy 값은 prompts.py 의 PROMPT_STRATEGIES 키와 짝이다 —
 """
 from dataclasses import dataclass
 
+from .. import settings
+
 
 @dataclass(frozen=True)  # frozen=True: 만든 뒤 값 변경 불가(실수 방지용 읽기 전용 묶음)
 class ContextPolicy:
@@ -33,6 +35,10 @@ CRISIS_POLICY = ContextPolicy("crisis_override", "cbt_label_guided", use_rag=Fal
 # ③ 기본값: 라벨별 지침이 담긴 CBT 프롬프트 + 참고자료 4건
 DEFAULT_POLICY = ContextPolicy("cbt_label_guided", "cbt_label_guided")
 
+# 저확신 강등: 왜곡 라벨인데 확신이 POLICY_MIN_CONFIDENCE 미만이면 이 정책으로.
+# 이름을 따로 둔 이유 — 세션 policy 메타데이터에서 "하한 때문에 강등된 턴"을 집계하기 위해.
+LOW_CONFIDENCE_POLICY = ContextPolicy("low_confidence_clarify", "clarify", use_rag=False)
+
 # ② 라벨별 예외 — 여기를 편집해서 라벨별 응답 방식을 조정한다
 POLICIES: dict[str, ContextPolicy] = {
     # 일반 발화: 왜곡 교정을 시도하지 않고 지지·공감 중심. 참고자료는 2건만 가볍게
@@ -50,7 +56,14 @@ POLICIES: dict[str, ContextPolicy] = {
 
 
 def resolve(safety: dict, classification: dict) -> ContextPolicy:
-    """안전검사 결과 + 대표 라벨 → 이번 턴에 적용할 정책 하나를 고른다."""
+    """안전검사 결과 + 대표 라벨(+확신 하한) → 이번 턴에 적용할 정책 하나를 고른다."""
     if not safety.get("safe", True):
         return CRISIS_POLICY
-    return POLICIES.get(classification.get("primary", ""), DEFAULT_POLICY)
+    primary = classification.get("primary", "")
+    # 저확신 강등: 왜곡 라벨인데 확신이 하한 미만이면 단정하지 않고 명확화로 (기본 꺼짐)
+    if settings.POLICY_MIN_CONFIDENCE > 0 and primary not in ("정상", "불충분", ""):
+        confidence = next((l.get("score", 0.0) for l in classification.get("labels", [])
+                           if l.get("label") == primary), 0.0)
+        if confidence < settings.POLICY_MIN_CONFIDENCE:
+            return LOW_CONFIDENCE_POLICY
+    return POLICIES.get(primary, DEFAULT_POLICY)
