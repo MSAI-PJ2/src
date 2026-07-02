@@ -1,4 +1,8 @@
-﻿"""SSE payload builders for the gateway API contract."""
+"""클라이언트로 내보내는 SSE 이벤트 payload 빌더.
+
+이벤트 종류와 필드는 API_CONTRACT.md 와 1:1 로 맞춘다.
+(DB 에 저장하는 세션 턴은 session/turns.py — 여기와 섞지 않는다.)
+"""
 
 INPUT_REQUIRED_STT_MESSAGE = (
     "audio payload was accepted, but STT did not produce a transcript. "
@@ -10,7 +14,7 @@ INPUT_REQUIRED_TEXT_MESSAGE = (
 )
 
 
-def stt_processing_payload(session_id: str, provider: str, language: str) -> dict:
+def stt_processing_event(session_id: str, provider: str, language: str) -> dict:
     return {
         "type": "stt",
         "session_id": session_id,
@@ -20,11 +24,11 @@ def stt_processing_payload(session_id: str, provider: str, language: str) -> dic
     }
 
 
-def stt_result_payload(session_id: str, result: dict) -> dict:
+def stt_result_event(session_id: str, result: dict) -> dict:
     return {"type": "stt", "session_id": session_id, **result}
 
 
-def input_required_payload(session_id: str, reason: str, message: str) -> dict:
+def input_required_event(session_id: str, reason: str, message: str) -> dict:
     return {
         "type": "input_required",
         "session_id": session_id,
@@ -33,7 +37,7 @@ def input_required_payload(session_id: str, reason: str, message: str) -> dict:
     }
 
 
-def meta_payload(
+def meta_event(
     session_id: str,
     turn_count: int,
     input_meta: dict,
@@ -58,7 +62,7 @@ def meta_payload(
     return payload
 
 
-def chunks_payload(session_id: str, chunks: list[dict]) -> dict:
+def chunks_event(session_id: str, chunks: list[dict]) -> dict:
     return {
         "type": "chunks",
         "session_id": session_id,
@@ -66,13 +70,13 @@ def chunks_payload(session_id: str, chunks: list[dict]) -> dict:
     }
 
 
-def token_payload(session_id: str, text: str) -> dict:
+def token_event(session_id: str, text: str) -> dict:
     return {"type": "token", "session_id": session_id, "text": text}
 
 
-def tts_payload(session_id: str, tts_event: dict) -> dict:
-    return {"type": "tts", "session_id": session_id, **tts_event}
+def tts_event(session_id: str, tts_result: dict) -> dict:
+    return {"type": "tts", "session_id": session_id, **tts_result}
 
 
-def done_payload(session_id: str) -> dict:
+def done_event(session_id: str) -> dict:
     return {"type": "done", "session_id": session_id}

@@ -1,64 +1,81 @@
-﻿# 게이트웨이 컨테이너
+# 게이트웨이 컨테이너
 
 이 폴더는 Azure Container Apps `api-gateway` 배포에 필요한 게이트웨이 컨테이너 소스입니다.
 리포지토리 루트에는 다른 팀 코드가 추가될 수 있으므로, 게이트웨이 Docker 빌드 컨텍스트는 `gateway-container/`로 제한합니다.
-
-## 폴더 구조
-
-```text
-gateway-container/
-|-- .dockerignore
-|-- .env.example
-|-- API_CONTRACT.md
-|-- README.md
-|-- README_GATEWAY_SHARE.md
-|-- docker-compose.yml
-|-- scripts/
-`-- services/
-    |-- api-gateway/
-    |   |-- Dockerfile
-    |   |-- requirements.txt
-    |   `-- app/
-    |-- common/
-    `-- retrieve/
-```
 
 ## 사용 기술
 
 ```text
 Framework: FastAPI + Uvicorn
 Container: Azure Container Apps / Azure Container Registry
-Auth: 임시 x-api-key
+Auth: 임시 x-api-key (Entra External ID 도입 예정 — app/core/auth.py 가이드)
 Classifier: internal cogdistmodel Container App
 Safety: Azure AI Content Safety + keyword fallback
 RAG: Azure AI Search
-LLM: Azure OpenAI gpt-4.1-mini
+LLM: Azure OpenAI gpt-4.1-mini (로컬 개발은 LLM_PROVIDER=local)
 Speech: Azure Speech STT/TTS
 Session store: memory 또는 Azure Cosmos DB NoSQL
 ```
 
-## 주요 파일
+## 폴더 구조
 
 ```text
-services/api-gateway/app/main.py                         FastAPI 라우트 진입점
-services/api-gateway/app/dag.py                          respond 오케스트레이션
-services/api-gateway/app/adapters.py                     외부 서비스 어댑터 경계
-services/api-gateway/app/request_context.py              /v1/respond 요청 정규화
-services/api-gateway/app/repositories/session_repository.py  memory/Cosmos 세션 저장소
-services/api-gateway/app/payloads.py                     SSE/API 페이로드 빌더
-services/api-gateway/app/turns.py                        세션 턴 빌더
-services/api-gateway/app/prompts.py                      LLM 메시지 빌더
-services/api-gateway/app/events.py                       SSE 직렬화
-services/api-gateway/app/safety.py                       Content Safety + 키워드 fallback
-services/api-gateway/app/tts.py                          TTS 이벤트 페이로드 빌더
-services/api-gateway/app/ranking.py                      RAG 후보 재정렬
-services/common/llm_client.py                            Azure OpenAI/local LLM 클라이언트
-services/common/retrieve_client.py                       Azure AI Search 저수준 클라이언트
-services/common/speech_client.py                         Azure Speech STT/TTS 클라이언트
-services/retrieve/client.py                              Retriever provider 래퍼
-scripts/                                                 Azure 회귀 테스트 스크립트
-API_CONTRACT.md                                          프론트엔드/테스트 API 계약서
+gateway-container/
+|-- API_CONTRACT.md            프론트엔드/테스트 API 계약서 (v1 기준 문서)
+|-- docker-compose.yml         로컬 실행
+|-- scripts/                   Azure 배포본 회귀 테스트 스크립트
+`-- services/
+    |-- api-gateway/
+    |   |-- Dockerfile
+    |   |-- requirements.txt
+    |   |-- tests/             v1 계약 테스트 (외부 서비스 없이 로컬 실행)
+    |   `-- app/
+    |       |-- main.py        앱 생성 + 라우터 등록만
+    |       |-- api/v1/        FastAPI 라우터 (HTTP 만 담당)
+    |       |-- orchestrator/  상담 응답 흐름 + 컨텍스트 정책 + 위기 분기
+    |       |-- services/      외부 서비스 어댑터 (컴포넌트당 파일 하나)
+    |       |-- session/       세션 저장소 (memory/Cosmos) + 턴 빌더
+    |       |-- streaming/     SSE 직렬화 + 이벤트 payload
+    |       |-- contracts/     요청 Pydantic 모델
+    |       |-- rag/           검색 후보 재정렬
+    |       |-- llm/           프롬프트 (사람 편집용)
+    |       `-- core/          설정 / 인증 / 계측
+    |-- common/                LLM/Speech 클라이언트 (+ *_legacy = 프로토타입 보관)
+    `-- retrieve/              Retriever provider (local stub / Azure AI Search)
 ```
+
+## 처음 읽는 사람의 읽는 순서
+
+```text
+1. API_CONTRACT.md                          외부 계약(엔드포인트/SSE 이벤트) 파악
+2. app/main.py → app/api/v1/                어떤 엔드포인트가 있는지
+3. app/orchestrator/respond_flow.py         상담 한 턴의 전체 흐름 (핵심)
+4. app/orchestrator/context_policy.py       라벨별 응답 정책 (사람 편집용)
+5. app/llm/prompts.py                       시스템 프롬프트/답변 스타일 (사람 편집용)
+6. app/services/                            외부 서비스 호출 세부
+7. app/session/, app/streaming/             저장/이벤트 형태
+```
+
+## 사람이 편집하도록 만든 지점
+
+```text
+답변 스타일/프롬프트     app/llm/prompts.py          (PERSONA, STYLE_RULES, LABEL_GUIDANCE)
+라벨별 응답 정책         app/orchestrator/context_policy.py  (POLICIES 테이블)
+위기 메시지/핫라인       app/orchestrator/crisis.py   (+ 위치 기반 DB 조회 작업 가이드)
+로그인(Entra) 도입       app/core/auth.py             (단계별 작업 가이드 주석)
+```
+
+## 테스트
+
+외부 서비스 없이 v1 계약(SSE 이벤트 순서/형태)을 검증합니다. 리팩토링 후 반드시 실행:
+
+```bash
+cd gateway-container/services/api-gateway
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q
+```
+
+Azure 배포본에 대한 회귀 테스트는 `scripts/`(실 endpoint 대상)를 사용합니다.
 
 ## ACR 빌드
 
@@ -95,7 +112,7 @@ docker compose -f gateway-container/docker-compose.yml up --build api-gateway
 - `/v1/respond` text/transcript/audio STT/TTS PASS
 - crisis branch PASS
 - Cosmos session persistence PASS
+- `tests/` 12건 (v1 계약 characterization) PASS — 리팩토링 전/후 동일 통과
 
 Document Intelligence OCR은 별도 브랜치 작업입니다.
 향후 예상 입력은 `/v1/respond`의 `input_type=document`이며, OCR 성공 후 기존 text DAG로 연결합니다.
-

@@ -19,7 +19,8 @@ services:
       CONTENT_SAFETY_KEY: ${CONTENT_SAFETY_KEY:-}
       CONTENT_SAFETY_THRESHOLD: ${CONTENT_SAFETY_THRESHOLD:-2}
       LLM_PROVIDER: ${LLM_PROVIDER:-local}
-      LOCAL_LLM_API_BASE: ${LOCAL_LLM_API_BASE:-http://host.docker.internal:8001/v1}
+      # llm_client.py 가 읽는 환경변수명은 LOCAL_LLM_BASE_URL 이다
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://host.docker.internal:8001/v1}
       LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-local-model}
       LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:-dummy}
     ports:

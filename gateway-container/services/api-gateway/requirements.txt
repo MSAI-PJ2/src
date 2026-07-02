@@ -7,4 +7,4 @@ azure-search-documents>=11.6.0
 azure-cognitiveservices-speech>=1.38.0
 pydub>=0.25.1
 azure-cosmos>=4.7.0
-azure-monitor-opentelementry
+azure-monitor-opentelemetry

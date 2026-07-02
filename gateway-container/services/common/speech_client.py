@@ -1,18 +1,15 @@
-"""Azure Speech STT/TTS client for the gateway.
+"""Azure Speech STT/TTS 클라이언트.
 
-llm_client.py, retrieve/client.py와 같은 패턴: 단순한 모듈 함수 +
-환경변수 설정. Speech SDK 호출은 블로킹(동기)이라서, 호출하는 쪽
-(main.py, dag.py)에서 asyncio.to_thread로 감싸서 씁니다.
+Speech SDK 호출은 블로킹(동기)이라서 호출하는 쪽(app/services/speech.py)에서
+asyncio.to_thread 로 감싸서 쓴다.
 
 연결 위치:
-    STT — main.py의 /v1/respond 핸들러, body.effective_text() 호출 전
-    TTS — dag.py의 respond_stream() (그리고 crisis 분기), 전체
-          assistant_text가 완성된 뒤 — TTS는 토큰 단위가 아니라
-          완성된 문장이 있어야 자연스럽게 합성됩니다.
+    STT — orchestrator/respond_flow.py 의 stt_then_respond_stream
+    TTS — respond_flow 의 respond_stream (crisis 분기 포함), LLM 스트리밍 종료 후
+          — TTS 는 토큰 단위가 아니라 완성된 문장이 있어야 자연스럽게 합성된다.
 
-스키마 참고: AudioIn.kind는 "url" | "base64" | "blob_ref" 중 하나
-(이 프로젝트는 blob_ref 미사용). kind == "base64"일 때, 실제 바이트는
-AudioIn.data 필드에 base64로 인코딩되어 들어옵니다.
+스키마 참고: AudioIn.kind 는 "url" | "base64" | "blob_ref" (blob_ref 미사용).
+kind == "base64" 이면 실제 바이트는 AudioIn.data 에 base64 로 들어온다.
 
 필요 환경변수:
     AZURE_SPEECH_KEY
@@ -50,7 +47,7 @@ def _speech_config(voice_name: str | None = None) -> speechsdk.SpeechConfig:
 
 
 def _resolve_audio_bytes(audio: dict) -> bytes:
-    """AudioIn.model_dump() 결과(dict)에서 실제 오디오 바이트를 꺼냅니다."""
+    """AudioIn.model_dump() 결과(dict)에서 실제 오디오 바이트를 꺼낸다."""
     kind = audio.get("kind")
 
     if kind == "base64":
@@ -96,11 +93,8 @@ def _to_wav(raw: bytes, mime_type: str | None) -> bytes:
         return raw
 
 
-def transcribe_audio_input(audio: dict) -> tuple[str, bool]:
-    """
-    audio (AudioIn.model_dump(exclude_none=True) 결과) → (transcript, success).
-    블로킹 호출입니다 — asyncio.to_thread로 감싸서 쓰세요.
-    """
+def _recognize_once(audio: dict) -> speechsdk.SpeechRecognitionResult:
+    """오디오 dict → WAV 변환 → Speech SDK 1회 인식. STT 실행 로직은 여기 한 곳에만 둔다."""
     raw = _resolve_audio_bytes(audio)
     wav = _to_wav(raw, audio.get("mime_type"))
 
@@ -113,55 +107,24 @@ def transcribe_audio_input(audio: dict) -> tuple[str, bool]:
         recognizer = speechsdk.SpeechRecognizer(
             speech_config=_speech_config(), audio_config=audio_cfg
         )
-        result = recognizer.recognize_once_async().get()
+        return recognizer.recognize_once_async().get()
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
 
-    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        return result.text.strip(), True
-    if result.reason == speechsdk.ResultReason.NoMatch:
-        logger.warning("STT NoMatch: %s", result.no_match_details)
-        return "", False
-
-    cancel = speechsdk.CancellationDetails.from_result(result)
-    raise RuntimeError(f"STT canceled: {cancel.reason} / {cancel.error_details}")
-
 
 def transcribe_audio_input_detailed(audio: dict) -> dict:
-    """Return a detailed STT result for SSE/debugging.
-
-    This keeps the old transcribe_audio_input() API available while giving the
-    gateway a stable contract for `stt` SSE events.
-    """
+    """STT 결과를 SSE `stt` 이벤트 계약 형태(dict)로 반환한다. 예외도 error dict 로 감싼다."""
+    base = {
+        "provider": "azure",
+        "language": audio.get("language") or "ko-KR",
+        "mime_type": audio.get("mime_type"),
+        "kind": audio.get("kind"),
+    }
     try:
-        raw = _resolve_audio_bytes(audio)
-        wav = _to_wav(raw, audio.get("mime_type"))
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(wav)
-            tmp_path = f.name
-
-        try:
-            audio_cfg = speechsdk.audio.AudioConfig(filename=tmp_path)
-            recognizer = speechsdk.SpeechRecognizer(
-                speech_config=_speech_config(), audio_config=audio_cfg
-            )
-            result = recognizer.recognize_once_async().get()
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-        base = {
-            "provider": "azure",
-            "language": audio.get("language") or "ko-KR",
-            "mime_type": audio.get("mime_type"),
-            "kind": audio.get("kind"),
-        }
+        result = _recognize_once(audio)
 
         if result.reason == speechsdk.ResultReason.RecognizedSpeech:
             return {
@@ -192,22 +155,17 @@ def transcribe_audio_input_detailed(audio: dict) -> dict:
             "error": str(cancel.error_details),
         }
     except Exception as exc:
-        return {
-            "status": "error",
-            "provider": "azure",
-            "language": audio.get("language") or "ko-KR",
-            "mime_type": audio.get("mime_type"),
-            "kind": audio.get("kind"),
-            "transcript": "",
-            "error": str(exc),
-        }
+        return {**base, "status": "error", "transcript": "", "error": str(exc)}
+
+
+def transcribe_audio_input(audio: dict) -> tuple[str, bool]:
+    """단순 (transcript, success) 형태가 필요한 곳을 위한 래퍼."""
+    detail = transcribe_audio_input_detailed(audio)
+    return detail.get("transcript", ""), detail.get("status") == "completed"
 
 
 def synthesize_speech_base64(text: str, voice_name: str | None = None) -> str:
-    """
-    text → base64 인코딩된 WAV 오디오 문자열.
-    블로킹 호출입니다 — asyncio.to_thread로 감싸서 쓰세요.
-    """
+    """text → base64 인코딩된 WAV 오디오 문자열. 블로킹 호출 — to_thread 로 감싸서 사용."""
     clean = _strip_markdown(text)
     synth = speechsdk.SpeechSynthesizer(
         speech_config=_speech_config(voice_name), audio_config=None
@@ -222,6 +180,7 @@ def synthesize_speech_base64(text: str, voice_name: str | None = None) -> str:
 
 
 def _strip_markdown(text: str) -> str:
+    """TTS 로 읽지 않을 마크다운/이모지 표기를 제거한다."""
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"#{1,6}\s*", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)

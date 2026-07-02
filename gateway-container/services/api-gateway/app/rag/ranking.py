@@ -1,6 +1,10 @@
-﻿"""RAG candidate ranking helpers."""
+"""RAG 검색 후보 재정렬.
 
-from . import settings
+점수를 0~1 로 정규화한 뒤, 분류 라벨과 일치하는 왜곡 기법 문서에 가산점(+0.3)을
+주고 중복 id 를 제거해 상위 top_n 개만 남긴다.
+"""
+
+from ..core import settings
 
 
 def rerank(
@@ -18,6 +22,7 @@ def rerank(
     max_score = max(scores)
     span = max_score - min_score
 
+    # 정상/불충분이거나 분류 확신이 낮으면 라벨 가산점을 주지 않는다.
     use_bias = primary not in ("정상", "불충분") and confidence >= 0.5
     deduped: dict[str, dict] = {}
 

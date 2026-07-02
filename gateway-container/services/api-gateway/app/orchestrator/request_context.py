@@ -1,24 +1,21 @@
-﻿"""Normalized request context for /v1/respond orchestration.
+"""/v1/respond 요청 정규화 컨텍스트.
 
-This module keeps transport/input-shape decisions out of dag.py. The public API
-contract stays in schemas.py; this file turns that contract into the internal
-shape used by orchestration and can later be extended for auth/profile context.
+전송 형태(text/transcript/audio) 판단을 respond_flow 밖으로 분리한다.
+외부 계약은 contracts/requests.py, 이 파일은 그 계약을 오케스트레이션이 쓰는
+내부 형태로 바꾼다. 로그인 도입 시 user_id 필드를 여기에 추가하면 된다.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-from .schemas import RespondIn
-
+from ..contracts.requests import RespondIn
 
 DEFAULT_LANGUAGE = "ko-KR"
 
 
 @dataclass(frozen=True)
 class RespondRequestContext:
-    """Internal normalized request context for the gateway response DAG."""
-
     session_id: str | None
     text: str | None
     input_meta: dict[str, Any]
@@ -60,7 +57,7 @@ class RespondRequestContext:
         return self.stt_options.get("provider") or "azure"
 
     def with_transcript(self, result: dict[str, Any]) -> "RespondRequestContext":
-        """Return a new context after STT successfully produced a transcript."""
+        """STT 성공 후 transcript 를 반영한 새 컨텍스트를 만든다."""
         language = result.get("language") or self.language
         stt_options = self.stt_options
         input_meta = {
@@ -85,5 +82,5 @@ class RespondRequestContext:
 
 
 def default_text_input_meta(input_meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Keep the legacy default shape used by /v1/respond text requests."""
+    """/v1/respond 텍스트 요청의 기존 기본 input 형태를 유지한다."""
     return input_meta or {"input_type": "text"}

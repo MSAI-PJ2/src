@@ -1,19 +1,16 @@
+"""게이트웨이 진입점 — 앱 생성, 미들웨어, 라우터 등록만 한다.
+
+엔드포인트 목록은 api/v1/, 상담 응답 흐름은 orchestrator/respond_flow.py 를 본다.
+"""
 import uuid
 
-import fastapi
-from azure.monitor.opentelemetry import configure_azure_monitor
-configure_azure_monitor()
-
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 
+from .api.v1 import router as v1_router
+from .core import settings, telemetry
 
-from . import dag, settings
-from .adapters import services
-from .repositories import session_repository
-from .request_context import RespondRequestContext
-from .schemas import BatchClassifyIn, ClassifyIn, RespondIn, SessionCreateIn
+telemetry.setup()  # App Insights — 연결 문자열이 있을 때만 활성화
 
 app = FastAPI(title="mlnode-api-gateway")
 
@@ -33,58 +30,4 @@ async def request_id(request: Request, call_next):
     return response
 
 
-async def require_key(x_api_key: str | None = Header(default=None)):
-    if settings.API_KEY_REQUIRED and x_api_key != settings.API_KEY:
-        raise HTTPException(401, "invalid api key")
-
-
-@app.get("/healthz")
-async def healthz():
-    return {"status": "ok"}
-
-
-@app.post("/v1/sessions", dependencies=[Depends(require_key)])
-async def create_session(body: SessionCreateIn | None = None):
-    return session_repository.create(body.session_id if body else None)
-
-
-@app.get("/v1/sessions/{session_id}", dependencies=[Depends(require_key)])
-async def get_session(session_id: str):
-    state = session_repository.snapshot(session_id)
-    if state is None:
-        raise HTTPException(404, "session not found")
-    return state
-
-
-@app.post("/v1/classify", dependencies=[Depends(require_key)])
-async def classify(body: ClassifyIn):
-    return await services.classifier.classify_one(body.text, body.threshold)
-
-
-@app.post("/v1/batch-classify", dependencies=[Depends(require_key)])
-async def batch_classify(body: BatchClassifyIn):
-    return await services.classifier.classify_batch(body.texts, body.threshold)
-
-
-@app.post("/v1/respond", dependencies=[Depends(require_key)])
-async def respond(body: RespondIn):
-    context = RespondRequestContext.from_body(body)
-
-    if context.requires_stt:
-        # Keep STT inside the streaming path so clients can receive explicit
-        # stt processing/completed/error events instead of a silent fallback.
-        return StreamingResponse(
-            dag.stt_then_respond_stream(context.session_id, context.input_meta, context.tts, context.llm),
-            media_type="text/event-stream",
-        )
-
-    if not context.has_text:
-        return StreamingResponse(
-            dag.input_pending_stream(context.session_id, context.input_meta, context.tts),
-            media_type="text/event-stream",
-        )
-
-    return StreamingResponse(
-        dag.respond_stream(context.text or "", context.session_id, context.input_meta, context.tts, context.llm),
-        media_type="text/event-stream",
-    )
+app.include_router(v1_router)

@@ -1,9 +1,11 @@
-"""현재 LLM_PROVIDER로 LLMClient 구조화 출력을 검증하는 스모크 테스트.
+"""현재 LLM_PROVIDER 운영 경로(chat/chat_stream/chat_stream_async) 스모크 테스트.
 
-실행:  LLM_PROVIDER=local python smoke_llm.py   (기본값 local = 무료 Nemotron)
+실행:  LLM_PROVIDER=local python smoke_llm.py   (기본값 local = 무료 로컬 서버)
        LLM_PROVIDER=azure python smoke_llm.py   (.env에 Azure 설정 필요)
+
+구조화(JSON) 출력 실험 경로 스모크는 llm_client_legacy.py 의 LegacyLLMClient 참고.
 """
-import json
+import asyncio
 import os
 import sys
 import time
@@ -12,49 +14,35 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from llm_client import LLMClient
 
-COUNSEL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "primary_distortion": {"type": "string"},
-        "explanation": {"type": "string"},
-        "reframe": {"type": "string"},
-        "crisis": {"type": "boolean"},
-    },
-    "required": ["primary_distortion", "explanation", "reframe", "crisis"],
-    "additionalProperties": False,
-}
-
-SYS = "당신은 인지왜곡 상담 보조입니다. 반드시 스키마에 맞는 JSON 하나만 출력하세요."
-
-
-def run_one(client, utterance):
-    messages = [
-        {"role": "system", "content": SYS},
-        {"role": "user", "content": utterance},
-    ]
-    started = time.time()
-    result = client.chat_json(
-        messages, COUNSEL_SCHEMA,
-        schema_name="counsel_response", temperature=0.0, max_tokens=900,
-    )
-    latency = time.time() - started
-    print(f"utterance: {utterance}")
-    print(f"latency_sec: {latency:.3f}")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    print()
+MESSAGES = [
+    {"role": "system", "content": "당신은 한국어 인지행동상담 보조자입니다. 두 문장 이내로 답하세요."},
+    {"role": "user", "content": "사람들 앞에 서면 다 망칠 게 뻔해요."},
+]
 
 
 def main():
     client = LLMClient()
     print(f"provider: {client.provider}")
     print(f"model: {client.model}")
+
+    started = time.time()
+    print("\n[chat]")
+    print(client.chat(MESSAGES, max_tokens=200))
+    print(f"latency_sec: {time.time() - started:.3f}")
+
+    print("\n[chat_stream]")
+    for token in client.chat_stream(MESSAGES, max_tokens=200):
+        print(token, end="", flush=True)
     print()
-    utterances = [
-        "사람들 앞에 서면 다 망칠 게 뻔해요.",
-        "다 끝내고 싶어요. 더 살 이유가 없는 것 같아요.",
-    ]
-    for utterance in utterances:
-        run_one(client, utterance)
+
+    print("\n[chat_stream_async]")
+
+    async def run_async():
+        async for token in client.chat_stream_async(MESSAGES, max_tokens=200):
+            print(token, end="", flush=True)
+        print()
+
+    asyncio.run(run_async())
 
 
 if __name__ == "__main__":
