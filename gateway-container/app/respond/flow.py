@@ -174,6 +174,11 @@ class RespondRequestContext:
         return list((self.input_meta.get("ocr") or {}).get("sender_names") or [])
 
     @property
+    def ocr_profile(self) -> str:
+        """이미지 해석 방법: generic(일반 이미지, 기본) | kakao(카톡 캡쳐 — 화자 분리)."""
+        return (self.input_meta.get("ocr") or {}).get("profile") or "generic"
+
+    @property
     def language(self) -> str:
         """인식 언어: stt.language > audio.language > 기본값(ko-KR) 순서로 고른다."""
         stt = self.input_meta.get("stt") or {}
@@ -297,31 +302,33 @@ async def stt_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
 
 
 async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, llm=None):
-    """채팅 캡쳐 이미지 입력: OCR → ocr 이벤트 → '나' 발화를 모아 일반 상담 흐름으로.
+    """이미지 입력: OCR → ocr 이벤트 → 추출된 사용자 텍스트로 일반 상담 흐름으로.
 
-    STT 흐름과 대칭 구조. OCR 파이프라인 원본은 리포 루트 di/kakao_ocr_pipeline.py
-    (팀원 작업물) — 게이트웨이는 그 복제본 services/document_ocr.py 를 사용한다.
+    STT 흐름과 대칭 구조. 이미지 해석은 ocr.profile 로 갈린다 (services/document_ocr.py):
+        generic  일반 이미지(일기·메모) — 추출 텍스트 전체를 사용자 발화로 (기본)
+        kakao    카톡 캡쳐 — 팀원 파이프라인(원본: di/)으로 화자 분리, "나" 발화만
     """
     context = RespondRequestContext(session_id, None, input_meta or {}, tts, llm)
     session = await session_repository.ensure(context.session_id)
     session_id = session["session_id"]
 
-    # "인식 시작" 알림을 먼저 보내고, Document Intelligence 로 대화 로그를 추출
+    # "인식 시작" 알림을 먼저 보내고, Document Intelligence 로 텍스트/대화를 추출
     yield sse(ocr_processing_event(session_id))
-    result = await services.document.extract_conversation(context.image, context.sender_names)
+    result = await services.document.extract(context.image, context.sender_names,
+                                             profile=context.ocr_profile)
     conversation = result.get("conversation") or []
-    # 상담 대상은 캡쳐 속 "나"(내담자 본인)의 발화 — 팀원의 분류 설계와 동일 기준
-    user_text = "\n".join(m.get("content", "") for m in conversation
-                          if m.get("speaker") == "나").strip()
+    user_text = (result.get("user_text") or "").strip()
 
     # 세션에는 원본 base64 를 빼고 저장한다 (Cosmos 문서 크기 한도·비용 보호)
     slim_image = {k: v for k, v in context.image.items() if k != "data"}
     stored_meta = {**context.input_meta, "image": slim_image}
 
     if result.get("status") != "completed" or not user_text:
-        # OCR 실패 또는 "나" 발화 없음: 실패 이벤트 + 재입력 요청을 명시적으로 보낸다
+        # OCR 실패 또는 쓸 텍스트 없음: 실패 이벤트 + 재입력 요청을 명시적으로 보낸다
         if result.get("status") == "completed":
-            result = {**result, "status": "no_user_messages"}
+            # kakao: "나" 발화가 없음 / generic: 이미지에서 텍스트를 못 찾음
+            reason = "no_user_messages" if context.ocr_profile == "kakao" else "no_text_found"
+            result = {**result, "status": reason}
         await session_repository.append_turn(session_id, ocr_failed_turn(stored_meta, result, tts))
         yield sse(ocr_result_event(session_id, result))
         yield sse(input_required_event(session_id, result.get("status") or "ocr_failed",
@@ -329,8 +336,11 @@ async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
         yield sse(done_event(session_id))
         return
 
-    # OCR 성공: 대화 로그를 입력 기록에 남기고 이벤트로 프론트에 전달
-    stored_meta["ocr"] = {**(stored_meta.get("ocr") or {}), "conversation": conversation}
+    # OCR 성공: 해석 결과를 입력 기록에 남기고 이벤트로 프론트에 전달
+    ocr_meta = {**(stored_meta.get("ocr") or {}), "profile": context.ocr_profile}
+    if conversation:
+        ocr_meta["conversation"] = conversation  # kakao 프로파일: 대화 로그 보존
+    stored_meta["ocr"] = ocr_meta
     yield sse(ocr_result_event(session_id, result))
     async for event in respond_stream(user_text, session_id, stored_meta, tts, llm):
         yield event
@@ -387,8 +397,10 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls))
 
     # 4) 위기 분기: LLM 답변 생성 없이 고정 메시지 + 상담 핫라인을 즉시 출력하고 종료
+    #    프론트가 metadata.region 을 보냈고 지역 연락처 DB 가 켜져 있으면 지역 창구를 앞에 붙인다
     if policy.is_crisis:
-        payload = respond_policy.crisis_payload(reason=safety.get("reason"))
+        region = (input_meta.get("metadata") or {}).get("region")
+        payload = await respond_policy.crisis_payload(reason=safety.get("reason"), region=region)
         yield sse(payload)
         await session_repository.append_turn(session_id, crisis_turn(payload))
         if tts and tts.get("enabled"):

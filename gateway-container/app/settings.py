@@ -22,8 +22,12 @@ REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
 # API_KEY_REQUIRED=true 면 모든 /v1 요청에 x-api-key 헤더가 있어야 한다
 API_KEY = os.getenv("API_KEY", "")
 API_KEY_REQUIRED = _bool("API_KEY_REQUIRED", False)
-# AUTH_MODE: api_key(현행) | entra(로그인 도입 예정 — api/v1.py 구획 2 가이드 참고)
+# AUTH_MODE: api_key(현행) | entra(아래 ENTRA_* 3개만 채우면 즉시 켜짐 — api/v1.py 구획 2)
 AUTH_MODE = os.getenv("AUTH_MODE", "api_key").strip().lower()
+# Microsoft Entra External ID (AUTH_MODE=entra 일 때만 사용)
+ENTRA_TENANT_ID = os.getenv("ENTRA_TENANT_ID", "")   # 테넌트 GUID (ISSUER 생략 시 여기서 유도)
+ENTRA_CLIENT_ID = os.getenv("ENTRA_CLIENT_ID", "")   # 이 API 앱 등록의 client id (토큰 aud)
+ENTRA_ISSUER = os.getenv("ENTRA_ISSUER", "")         # 예: https://{테넌트GUID}.ciamlogin.com/{테넌트GUID}/v2.0
 # 브라우저에서 이 서버를 호출할 수 있는 프론트엔드 주소 목록 (쉼표 구분)
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -53,6 +57,12 @@ RERANK_BIAS_SOURCE = os.getenv("RERANK_BIAS_SOURCE", "score").strip().lower()
 # 왜곡 라벨인데 확신이 이 값 미만이면 CBT 프롬프트 대신 명확화(clarify)로 강등.
 # 0 = 꺼짐(현행). sigmoid multi_label 모델은 점수가 낮게 깔리므로 값 설정 시 주의.
 POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
+
+# --- 위기 지역 연락처 DB (respond/policy.py 구획 3) ---
+# HOTLINE_CONTAINER 를 채우면 켜짐 — 세션과 같은 Cosmos 계정(COSMOS_*)을 쓴다.
+HOTLINE_CONTAINER = os.getenv("HOTLINE_CONTAINER", "")
+HOTLINE_DATABASE = os.getenv("HOTLINE_DATABASE", "")            # 비우면 COSMOS_DATABASE 사용
+HOTLINE_TIMEOUT_SECONDS = float(os.getenv("HOTLINE_TIMEOUT_SECONDS", "3"))  # 초과 시 전국 공통만
 
 # --- 세션(대화 기록) 저장소: memory(개발/테스트용, 서버 재시작 시 소멸) | cosmos(운영 DB) ---
 SESSION_REPOSITORY = os.getenv("SESSION_REPOSITORY", "memory")

@@ -124,6 +124,60 @@ def test_respond_crisis_branch(gateway, monkeypatch):
     assert crisis["resources"] and all({"name", "phone"} <= set(r) for r in crisis["resources"])
 
 
+def test_crisis_regional_hotlines(gateway, monkeypatch):
+    """지역 연락처 DB 가 켜져 있고 metadata.region 이 오면 지역 창구가 전국 공통 앞에 붙는다."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    from app import settings
+    from app.respond import policy
+    monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "hotline-directory")
+    regional = [{"name": "강남구 정신건강복지센터", "phone": "02-000-0000", "hours": "평일 09-18시"}]
+    calls = []
+    monkeypatch.setattr(policy, "lookup_regional_hotlines",
+                        lambda region: calls.append(region) or regional)
+
+    events = sse_events(client.post("/v1/respond", json={
+        "text": "더 살 이유가 없는 것 같아요",
+        "metadata": {"region": "서울특별시 강남구"}}))
+    crisis = events[1]
+    assert crisis["resources"][:1] == regional            # 지역 창구가 맨 앞
+    assert crisis["resources"][1:] == policy.HOTLINES     # 전국 공통이 그 뒤
+    assert calls == ["서울특별시 강남구"]
+
+
+def test_crisis_lookup_failure_never_blocks(gateway, monkeypatch):
+    """지역 조회가 실패해도 위기 응답은 전국 공통 창구로 반드시 나간다."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    from app import settings
+    from app.respond import policy
+    monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "hotline-directory")
+
+    def boom(region):
+        raise RuntimeError("cosmos down")
+    monkeypatch.setattr(policy, "lookup_regional_hotlines", boom)
+
+    events = sse_events(client.post("/v1/respond", json={
+        "text": "더 살 이유가 없는 것 같아요", "metadata": {"region": "서울특별시 강남구"}}))
+    assert types_of(events) == ["meta", "crisis", "done"]
+    assert events[1]["resources"] == policy.HOTLINES
+
+
+def test_crisis_no_region_skips_lookup(gateway, monkeypatch):
+    """DB 가 켜져 있어도 region 이 안 오면 조회 없이 전국 공통만 나간다."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    from app import settings
+    from app.respond import policy
+    monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "hotline-directory")
+    calls = []
+    monkeypatch.setattr(policy, "lookup_regional_hotlines", lambda r: calls.append(r) or [])
+
+    events = sse_events(client.post("/v1/respond", json={"text": "더 살 이유가 없는 것 같아요"}))
+    assert events[1]["resources"] == policy.HOTLINES
+    assert calls == []   # region 없음 → 조회 자체를 안 한다
+
+
 def test_respond_transcript_path(gateway):
     client, _ = gateway
     events = sse_events(client.post("/v1/respond", json={"stt": {"transcript": "전사된 문장입니다"}}))
@@ -174,12 +228,56 @@ def test_api_key_required(gateway, monkeypatch):
     assert ok.status_code == 200 and ok.json()["primary"] == CLS_RESULT["primary"]
 
 
-def test_auth_mode_entra_fails_fast(gateway, monkeypatch):
-    """AUTH_MODE=entra 는 구현 전까지 501 로 명시적으로 실패해야 한다 (api/v1.py 구획 2)."""
+class _FakeVerifier:
+    """Entra JWT 검증기 대역 — 네트워크·PyJWT 없이 토큰 게이트만 검증."""
+    def verify(self, token):
+        if token == "good-token":
+            return "user-abc-123"
+        raise ValueError("bad token")
+
+
+def _enable_entra(monkeypatch):
+    from app import settings
+    from app.api import v1
+    monkeypatch.setattr(settings, "AUTH_MODE", "entra")
+    monkeypatch.setattr(v1, "_verifier", _FakeVerifier())  # 실제 검증기 생성 차단
+
+
+def test_entra_valid_token_passes(gateway, monkeypatch):
+    client, _ = gateway
+    _enable_entra(monkeypatch)
+    r = client.post("/v1/classify", json={"text": "x"},
+                    headers={"Authorization": "Bearer good-token"})
+    assert r.status_code == 200 and r.json()["primary"] == CLS_RESULT["primary"]
+
+
+def test_entra_missing_token_401(gateway, monkeypatch):
+    client, _ = gateway
+    _enable_entra(monkeypatch)
+    assert client.post("/v1/classify", json={"text": "x"}).status_code == 401
+
+
+def test_entra_bad_token_401(gateway, monkeypatch):
+    client, _ = gateway
+    _enable_entra(monkeypatch)
+    r = client.post("/v1/classify", json={"text": "x"},
+                    headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401
+
+
+def test_entra_misconfigured_500(gateway, monkeypatch):
+    """AUTH_MODE=entra 인데 ENTRA_* 설정이 없으면 500(서버 오설정)으로 명확히 실패."""
     client, _ = gateway
     from app import settings
+    from app.api import v1
     monkeypatch.setattr(settings, "AUTH_MODE", "entra")
-    assert client.post("/v1/classify", json={"text": "x"}).status_code == 501
+    monkeypatch.setattr(v1, "_verifier", None)           # 실제 생성 경로로
+    monkeypatch.setattr(settings, "ENTRA_CLIENT_ID", "")
+    monkeypatch.setattr(settings, "ENTRA_ISSUER", "")
+    monkeypatch.setattr(settings, "ENTRA_TENANT_ID", "")
+    r = client.post("/v1/classify", json={"text": "x"},
+                    headers={"Authorization": "Bearer any"})
+    assert r.status_code == 500
 
 
 def test_batch_classify(gateway):

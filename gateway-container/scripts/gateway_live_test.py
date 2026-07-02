@@ -70,15 +70,17 @@ def run(mode: str) -> bool:
         return check("audio", post_sse({"session_id": sid, "audio": {
             "kind": "base64", "data": data, "mime_type": "audio/wav"}}), ["stt"])
     if mode == "image":
-        path = os.environ.get("TEST_IMAGE_FILE")  # 채팅 캡쳐 jpeg/png (예: di/di_test_image.jpeg)
+        path = os.environ.get("TEST_IMAGE_FILE")  # jpeg/png (카톡 캡쳐 예: di/di_test_image.jpeg)
         if not path:
             print("[SKIP] image: set TEST_IMAGE_FILE=<jpeg/png path>")
             return True
+        profile = os.environ.get("TEST_OCR_PROFILE", "kakao")  # kakao | generic
         names = [n for n in os.environ.get("TEST_SENDER_NAMES", "").split(",") if n]
         data = base64.b64encode(open(path, "rb").read()).decode()
-        return check("image", post_sse({"session_id": sid,
-                                        "image": {"kind": "base64", "data": data, "mime_type": "image/jpeg"},
-                                        "ocr": {"sender_names": names}}), ["ocr"])
+        return check(f"image({profile})", post_sse({
+            "session_id": sid,
+            "image": {"kind": "base64", "data": data, "mime_type": "image/jpeg"},
+            "ocr": {"profile": profile, "sender_names": names}}), ["ocr"])
     if mode == "session":
         post_sse({"session_id": sid, "text": TEXT})
         snap = get(f"/v1/sessions/{sid}")

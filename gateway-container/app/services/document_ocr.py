@@ -148,23 +148,55 @@ def build_conversation(parsed_lines: list) -> list:
     return messages
 
 
-def extract_conversation(image: dict, sender_names: list[str] | None = None) -> dict:
-    """이미지 dict → 대화 로그. SSE `ocr` 이벤트 계약(dict)으로 반환하며 예외도 error 로 감싼다.
+# ---------------------------------------------------------------------------
+# 프로파일 — 이미지 종류별 해석 방법. 새 메신저/문서 형식은 여기에 함수를 추가하고
+# PROFILES 에 한 줄 등록하면 된다 (요청의 ocr.profile 값과 짝).
+# ---------------------------------------------------------------------------
 
-    반환: {provider, status: completed|error, conversation: [{speaker, content, time}], error?}
+def _parse_kakao(page_data: dict, sender_names: list[str] | None) -> dict:
+    """카카오톡 캡쳐: 팀원 파이프라인으로 화자를 분리하고 "나"(내담자) 발화만 상담 입력으로."""
+    conversation = build_conversation(parse_lines(page_data, set(sender_names or [])))
+    user_text = "\n".join(m.get("content", "") for m in conversation
+                          if m.get("speaker") == "나").strip()
+    return {"conversation": conversation, "user_text": user_text}
+
+
+def _parse_generic(page_data: dict, sender_names: list[str] | None) -> dict:
+    """일반 이미지(일기·메모 등): 레이아웃 가정 없이 추출된 텍스트 전체를 사용자 발화로."""
+    text = "\n".join(line["content"] for line in page_data["lines"]).strip()
+    return {"conversation": [], "user_text": text}
+
+
+PROFILES = {
+    "kakao": _parse_kakao,      # 카톡 캡쳐 — 좌우 화자 판별 (원본: di/ 파이프라인)
+    "generic": _parse_generic,  # 일반 이미지 — 텍스트 전체 (기본값)
+}
+
+
+def extract(image: dict, sender_names: list[str] | None = None,
+            profile: str = "generic") -> dict:
+    """이미지 dict → OCR 해석 결과. SSE `ocr` 이벤트 계약(dict)으로 반환하며 예외도 error 로 감싼다.
+
+    반환: {provider, profile, status: completed|error,
+           user_text(상담 입력으로 쓸 텍스트), conversation(kakao 프로파일만 채워짐), error?}
     """
-    base = {"provider": "azure_document_intelligence", "kind": image.get("kind") if image else None}
+    base = {"provider": "azure_document_intelligence", "profile": profile,
+            "kind": image.get("kind") if image else None}
+    parser = PROFILES.get(profile)
+    if parser is None:
+        return {**base, "status": "error", "conversation": [], "user_text": "",
+                "error": f"unsupported ocr.profile: {profile!r} (지원: {', '.join(PROFILES)})"}
     try:
         raw = resolve_image_bytes(image or {})
         page_data = analyze_image_bytes(raw)
-        parsed = parse_lines(page_data, set(sender_names or []))
-        conversation = build_conversation(parsed)
-        return {**base, "status": "completed", "conversation": conversation}
+        return {**base, "status": "completed", **parser(page_data, sender_names)}
     except Exception as exc:
-        return {**base, "status": "error", "conversation": [], "error": str(exc)[:300]}
+        return {**base, "status": "error", "conversation": [], "user_text": "",
+                "error": str(exc)[:300]}
 
 
 class DocumentAdapter:
-    async def extract_conversation(self, image: dict | None, sender_names: list[str] | None = None) -> dict:
-        """이미지 → {status, conversation:[{speaker, content, time}], error?} (ocr 이벤트 형식)."""
-        return await asyncio.to_thread(extract_conversation, image, sender_names)
+    async def extract(self, image: dict | None, sender_names: list[str] | None = None,
+                      profile: str = "generic") -> dict:
+        """이미지 → {status, profile, user_text, conversation, error?} (ocr 이벤트 형식)."""
+        return await asyncio.to_thread(extract, image, sender_names, profile)

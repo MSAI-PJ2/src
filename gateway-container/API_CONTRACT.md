@@ -88,6 +88,28 @@ x-api-key: <GATEWAY_API_KEY>
 {"detail":"invalid api key"}
 ```
 
+### 인증 모드 (AUTH_MODE)
+
+```text
+api_key(기본)  x-api-key 헤더 검사. current_user = "anonymous"
+entra          Microsoft Entra External ID 의 JWT 검증 (코드 구현됨, 설정만으로 켜짐)
+```
+
+`AUTH_MODE=entra` 로 켜면 헤더가 바뀐다 — 프론트가 로그인 후 받은 액세스 토큰을 첨부:
+
+```http
+Authorization: Bearer <JWT>
+```
+
+서버는 서명(JWKS)·issuer·audience·만료를 검증하고 user_id(oid)를 추출한다.
+필요 환경변수: `ENTRA_CLIENT_ID` + (`ENTRA_TENANT_ID` 또는 `ENTRA_ISSUER`).
+
+```text
+토큰 없음/형식 오류      -> 401 {"detail":"missing bearer token"}
+서명·만료·aud/iss 불일치 -> 401 {"detail":"invalid or expired token"}
+ENTRA_* 설정 누락        -> 500 {"detail":"entra auth misconfigured: ..."}
+```
+
 ## 4. Health
 
 ```http
@@ -449,6 +471,26 @@ meta -> crisis -> done
 - crisis 메시지는 안전 배리어 정책에 따라 고정/템플릿화된 응답이다.
 ```
 
+### 위치 기반 유관기관 연락처 (코드 구현됨, 설정만으로 켜짐)
+
+프론트가 요청에 지역명을 넣어 보내면, 해당 지역 상담기관이 전국 공통 창구 **앞에** 붙는다:
+
+```json
+{
+  "text": "...",
+  "metadata": {"region": "서울특별시 강남구"}
+}
+```
+
+```text
+resources = [지역 창구(최대 3)... , 전국 공통 3종]
+```
+
+서버 설정: 세션과 같은 Cosmos 계정에 연락처 컨테이너(파티션키 /region,
+문서 {"region","name","phone","hours"})를 만들고 `HOTLINE_CONTAINER=<컨테이너명>` 지정.
+설정이 없거나 region 미전송, 조회 실패/타임아웃(기본 3초)이면 — 어떤 경우에도
+위기 응답은 실패하지 않고 전국 공통 창구만 반환된다.
+
 ## 14. Session API와 Cosmos DB 계약
 
 ```http
@@ -642,11 +684,15 @@ tts.voice=ko-KR-SunHiNeural
 tts.format=wav 또는 mp3
 ```
 
-## 19. Respond - image 입력 (채팅 캡쳐 OCR)
+## 19. Respond - image 입력 (OCR)
 
-카카오톡 등 채팅 캡쳐 이미지를 보내면 Azure Document Intelligence 로 대화를 복원해
-"나"(내담자 본인)의 발화를 상담 입력으로 사용한다.
-(과거 초안의 `input_type=document` 명칭은 `image` 로 확정됨.)
+이미지를 보내면 Azure Document Intelligence 로 텍스트를 추출해 상담 입력으로 사용한다.
+해석 방법은 `ocr.profile` 로 갈린다 (과거 초안의 `input_type=document` 명칭은 `image` 로 확정됨):
+
+```text
+generic (기본)  일반 이미지(일기·메모 등) — 추출 텍스트 전체를 사용자 발화로
+kakao           카카오톡 캡쳐 — 화자 분리 후 "나"(내담자) 발화만 상담 입력으로
+```
 
 OCR 파이프라인 원본은 리포 루트 `di/kakao_ocr_pipeline.py`(DI 담당 팀원 작업물,
 설명은 `di/README.md`)이며, Gateway 는 그 복제본 `app/services/document_ocr.py` 를 사용한다.
@@ -656,7 +702,7 @@ DOCINTEL_ENDPOINT=https://<your-doc-intel-resource>.cognitiveservices.azure.com/
 DOCINTEL_KEY=<set-in-azure-secret-or-local-env>
 ```
 
-요청:
+요청 (카톡 캡쳐):
 
 ```json
 {
@@ -667,23 +713,29 @@ DOCINTEL_KEY=<set-in-azure-secret-or-local-env>
     "mime_type": "image/png"
   },
   "ocr": {
+    "profile": "kakao",
     "sender_names": ["감동받은 어피치"]
   }
 }
 ```
 
+요청 (일반 이미지): `ocr` 를 생략하거나 `{"profile": "generic"}` — sender_names 불필요.
+
 - `image.kind`: `base64` | `url`
-- `ocr.sender_names`(선택): 채팅방 상단에 뜨는 상대 이름 목록. 지정하면 화자 판별 정확도가 올라간다.
+- `ocr.profile`: `generic`(기본) | `kakao`
+- `ocr.sender_names`(kakao 전용, 선택): 채팅방 상단에 뜨는 상대 이름 목록. 지정하면 화자 판별 정확도가 올라간다.
 - `text` 가 함께 오면 OCR 을 건너뛰고 text 를 사용한다 (text > image 우선순위).
 
 이벤트 순서:
 
 ```text
-성공:  ocr(processing) -> ocr(completed, conversation 포함) -> meta -> chunks -> token... -> done
-실패:  ocr(processing) -> ocr(error|no_user_messages) -> input_required -> done
+성공:  ocr(processing) -> ocr(completed, profile·user_text[·conversation] 포함) -> meta -> chunks -> token... -> done
+실패:  ocr(processing) -> ocr(error | no_user_messages(kakao) | no_text_found(generic)) -> input_required -> done
 ```
 
-`ocr(completed)` 이벤트의 `conversation` 형식 (di 파이프라인 출력과 동일):
+`ocr(completed)` 이벤트의 `user_text` = 상담 입력으로 쓸 텍스트
+(generic: 추출 전체 / kakao: `speaker == "나"` 발화를 개행으로 연결).
+kakao 프로파일의 `conversation` 형식 (di 파이프라인 출력과 동일):
 
 ```json
 [
@@ -692,10 +744,10 @@ DOCINTEL_KEY=<set-in-azure-secret-or-local-env>
 ]
 ```
 
-- 상담 입력 텍스트 = `speaker == "나"` 인 발화들을 개행으로 연결한 것.
-- OCR 성공 후에도 `meta` 이벤트·세션 턴의 `input.input_type` 은 `"image"` 로 유지된다
-  (STT 가 `transcript` 로 바꾸는 것과 다름 — 입력 원천을 그대로 기록).
-- "나" 발화가 없으면 `no_user_messages` 로 input_required 처리.
+- OCR 성공 후에도 `meta` 이벤트·세션 턴의 `input.input_type` 은 `"image"` 로 유지되고,
+  `input.ocr.profile` 에 해석 방법이 기록된다 (kakao 는 `input.ocr.conversation` 도 보존).
+- kakao 에서 "나" 발화가 없으면 `no_user_messages`, generic 에서 텍스트가 없으면
+  `no_text_found` 로 input_required 처리.
 - 세션 턴에는 `input.image` 에서 원본 base64(`data`)를 제거하고 저장한다
   (Cosmos 문서 크기 한도 보호). `input.ocr.conversation` 은 보존된다.
 
