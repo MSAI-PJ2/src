@@ -10,9 +10,14 @@
 흐름과의 연결: respond/flow.py 의 respond_stream 이
     resolve()(구획 1) → build_llm_messages()(구획 2) / crisis_payload()(구획 3) 순으로 쓴다.
 """
+import asyncio
+import logging
+import os
 from dataclasses import dataclass
 
 from .. import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -203,33 +208,81 @@ CRISIS_MESSAGE = (
 )
 
 
+# 지역 연락처를 전국 공통 앞에 최대 몇 개까지 붙일지 (사람 편집)
+REGIONAL_HOTLINES_MAX = 3
+
+_hotline_container = None  # Cosmos 컨테이너 — 첫 조회 때 1회 생성해 재사용
+
+
+def _get_hotline_container():
+    """지역 연락처 Cosmos 컨테이너 연결. 세션 저장소와 같은 계정(COSMOS_*)을 쓰고
+    컨테이너 이름만 HOTLINE_CONTAINER 로 지정한다 (파티션 키 = /region 권장)."""
+    global _hotline_container
+    if _hotline_container is None:
+        from azure.cosmos import CosmosClient  # cosmos 는 이 기능을 켠 경우에만 필요
+
+        conn = os.getenv("COSMOS_CONNECTION_STRING", "")
+        if conn:
+            client = CosmosClient.from_connection_string(conn)
+        else:
+            endpoint, key = os.getenv("COSMOS_ENDPOINT", ""), os.getenv("COSMOS_KEY", "")
+            if not endpoint or not key:
+                raise ValueError("hotline lookup requires COSMOS_ENDPOINT + COSMOS_KEY (or COSMOS_CONNECTION_STRING)")
+            client = CosmosClient(endpoint, credential=key)
+        database = settings.HOTLINE_DATABASE or os.getenv("COSMOS_DATABASE", "")
+        if not database:
+            raise ValueError("hotline lookup requires HOTLINE_DATABASE or COSMOS_DATABASE")
+        _hotline_container = client.get_database_client(database) \
+                                   .get_container_client(settings.HOTLINE_CONTAINER)
+    return _hotline_container
+
+
 def lookup_regional_hotlines(region: str | None) -> list[dict]:
-    """내담자 지역의 상담기관 조회 — 아직 미구현이라 항상 빈 목록(전국 공통만 노출).
+    """내담자 지역의 상담기관 연락처 조회 (블로킹 — crisis_payload 가 to_thread 로 감싼다).
 
-    ── [사람 작업 가이드] 위치 기반 유관기관 DB 조회 (도입 예정) ──────────
-    목표: 내담자 지역의 정신건강복지센터를 전국 공통 창구보다 먼저 보여주기.
-    1. 데이터: Cosmos DB 에 연락처 컨테이너 생성 (예: hotline-directory, 파티션키 /region)
-       문서 예 {"region":"서울특별시 강남구","name":"강남구 정신건강복지센터",
-                "phone":"02-...","hours":"평일 09-18시"}
-    2. 입력: 프론트가 요청의 metadata.region 에 지역명을 넣어 보낸다
-       → flow.respond_stream 에서 input_meta["metadata"] 로 꺼낼 수 있다
-    3. 구현: 이 함수에서 region 으로 Cosmos 를 조회해 목록 반환.
-       Cosmos SDK 는 블로킹(기다리는 동안 서버가 멈춤)이므로 session.py 의
-       CosmosSessionRepository 처럼 asyncio.to_thread 로 감싸고, 이 함수와
-       crisis_payload 를 async 로 바꾼 뒤 flow 의 호출부에 await 를 붙인다.
-    4. 안전: 조회 실패·미등록 지역이면 반드시 빈 목록을 반환할 것 —
-       위기 응답은 어떤 경우에도 실패하면 안 된다 (전국 공통 창구가 항상 나가야 함).
-    ────────────────────────────────────────────────────────────────
+    구현 완료·기본 잠금 상태: HOTLINE_CONTAINER 설정이 비어 있으면 빈 목록(기능 꺼짐).
+    켜는 법: ① Cosmos 에 컨테이너 생성(예: hotline-directory, 파티션키 /region)
+            문서 예 {"region":"서울특별시 강남구","name":"강남구 정신건강복지센터",
+                     "phone":"02-...","hours":"평일 09-18시"}
+           ② .env 에 HOTLINE_CONTAINER=hotline-directory
+           ③ 프론트가 요청의 metadata.region 에 지역명을 넣어 보내면 끝.
     """
-    return []
+    region = (region or "").strip()
+    if not settings.HOTLINE_CONTAINER or not region:
+        return []
+    rows = _get_hotline_container().query_items(
+        query="SELECT c.name, c.phone, c.hours FROM c WHERE c.region = @region",
+        parameters=[{"name": "@region", "value": region}],
+        partition_key=region,  # 파티션 키 조회 — 지역 하나만 읽는 가장 싼 쿼리
+    )
+    out = []
+    for row in rows:
+        out.append({"name": row.get("name", ""), "phone": row.get("phone", ""),
+                    "hours": row.get("hours", "")})
+        if len(out) >= REGIONAL_HOTLINES_MAX:
+            break
+    return out
 
 
-def crisis_payload(reason: str | None = None, region: str | None = None) -> dict:
-    """프론트로 보낼 위기 이벤트 한 덩어리 (flow.respond_stream 이 LLM 대신 이것을 출력)."""
+async def crisis_payload(reason: str | None = None, region: str | None = None) -> dict:
+    """프론트로 보낼 위기 이벤트 한 덩어리 (flow.respond_stream 이 LLM 대신 이것을 출력).
+
+    지역 조회는 어떤 경우에도 위기 응답을 막지 못한다 — 실패·타임아웃이면
+    조용히 전국 공통 창구만 내보낸다 (위기 응답은 실패 금지가 최우선 원칙).
+    """
+    regional: list[dict] = []
+    if settings.HOTLINE_CONTAINER and region:
+        try:
+            # 블로킹 Cosmos 조회를 스레드로 오프로딩 + 상한시간 초과 시 포기
+            regional = await asyncio.wait_for(
+                asyncio.to_thread(lookup_regional_hotlines, region),
+                timeout=settings.HOTLINE_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning("지역 연락처 조회 실패 — 전국 공통 창구만 출력: %s", exc)
     return {
         "type": "crisis",
         "blocked": True,          # 이 턴은 AI 답변이 차단됐다는 표시
         "reason": reason,         # 차단 사유 (예: self_harm_signal)
         "message": CRISIS_MESSAGE,
-        "resources": [*lookup_regional_hotlines(region), *HOTLINES],  # 지역 창구 먼저, 전국 공통 다음
+        "resources": [*regional, *HOTLINES],  # 지역 창구 먼저, 전국 공통 다음
     }

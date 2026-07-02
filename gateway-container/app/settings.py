@@ -58,6 +58,12 @@ RERANK_BIAS_SOURCE = os.getenv("RERANK_BIAS_SOURCE", "score").strip().lower()
 # 0 = 꺼짐(현행). sigmoid multi_label 모델은 점수가 낮게 깔리므로 값 설정 시 주의.
 POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
 
+# --- 위기 지역 연락처 DB (respond/policy.py 구획 3) ---
+# HOTLINE_CONTAINER 를 채우면 켜짐 — 세션과 같은 Cosmos 계정(COSMOS_*)을 쓴다.
+HOTLINE_CONTAINER = os.getenv("HOTLINE_CONTAINER", "")
+HOTLINE_DATABASE = os.getenv("HOTLINE_DATABASE", "")            # 비우면 COSMOS_DATABASE 사용
+HOTLINE_TIMEOUT_SECONDS = float(os.getenv("HOTLINE_TIMEOUT_SECONDS", "3"))  # 초과 시 전국 공통만
+
 # --- 세션(대화 기록) 저장소: memory(개발/테스트용, 서버 재시작 시 소멸) | cosmos(운영 DB) ---
 SESSION_REPOSITORY = os.getenv("SESSION_REPOSITORY", "memory")
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))      # 세션 유효시간(초)

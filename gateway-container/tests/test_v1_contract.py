@@ -124,6 +124,60 @@ def test_respond_crisis_branch(gateway, monkeypatch):
     assert crisis["resources"] and all({"name", "phone"} <= set(r) for r in crisis["resources"])
 
 
+def test_crisis_regional_hotlines(gateway, monkeypatch):
+    """지역 연락처 DB 가 켜져 있고 metadata.region 이 오면 지역 창구가 전국 공통 앞에 붙는다."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    from app import settings
+    from app.respond import policy
+    monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "hotline-directory")
+    regional = [{"name": "강남구 정신건강복지센터", "phone": "02-000-0000", "hours": "평일 09-18시"}]
+    calls = []
+    monkeypatch.setattr(policy, "lookup_regional_hotlines",
+                        lambda region: calls.append(region) or regional)
+
+    events = sse_events(client.post("/v1/respond", json={
+        "text": "더 살 이유가 없는 것 같아요",
+        "metadata": {"region": "서울특별시 강남구"}}))
+    crisis = events[1]
+    assert crisis["resources"][:1] == regional            # 지역 창구가 맨 앞
+    assert crisis["resources"][1:] == policy.HOTLINES     # 전국 공통이 그 뒤
+    assert calls == ["서울특별시 강남구"]
+
+
+def test_crisis_lookup_failure_never_blocks(gateway, monkeypatch):
+    """지역 조회가 실패해도 위기 응답은 전국 공통 창구로 반드시 나간다."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    from app import settings
+    from app.respond import policy
+    monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "hotline-directory")
+
+    def boom(region):
+        raise RuntimeError("cosmos down")
+    monkeypatch.setattr(policy, "lookup_regional_hotlines", boom)
+
+    events = sse_events(client.post("/v1/respond", json={
+        "text": "더 살 이유가 없는 것 같아요", "metadata": {"region": "서울특별시 강남구"}}))
+    assert types_of(events) == ["meta", "crisis", "done"]
+    assert events[1]["resources"] == policy.HOTLINES
+
+
+def test_crisis_no_region_skips_lookup(gateway, monkeypatch):
+    """DB 가 켜져 있어도 region 이 안 오면 조회 없이 전국 공통만 나간다."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    from app import settings
+    from app.respond import policy
+    monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "hotline-directory")
+    calls = []
+    monkeypatch.setattr(policy, "lookup_regional_hotlines", lambda r: calls.append(r) or [])
+
+    events = sse_events(client.post("/v1/respond", json={"text": "더 살 이유가 없는 것 같아요"}))
+    assert events[1]["resources"] == policy.HOTLINES
+    assert calls == []   # region 없음 → 조회 자체를 안 한다
+
+
 def test_respond_transcript_path(gateway):
     client, _ = gateway
     events = sse_events(client.post("/v1/respond", json={"stt": {"transcript": "전사된 문장입니다"}}))
