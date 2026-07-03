@@ -131,7 +131,7 @@ def test_crisis_regional_hotlines(gateway, monkeypatch):
     from app import settings
     from app.respond import policy
     monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "kfsp_centers")
-    regional = [{"name": "강릉시자살예방센터", "phone": "033-651-9668", "address": "강원 강릉시 남구길23번길 24"}]
+    regional = [{"name": "○○시자살예방센터", "phone": "033-000-0000", "address": "강원특별자치도 ○○시 ○○로 00"}]
     calls = []
     monkeypatch.setattr(policy, "lookup_regional_hotlines",
                         lambda region, district=None: calls.append((region, district)) or regional)
@@ -187,14 +187,14 @@ def test_hotline_kfsp_field_mapping(monkeypatch):
     class _FakeContainer:
         def query_items(self, query, parameters, partition_key):
             assert partition_key == "강원특별자치도"       # 시도 파티션으로 조회
-            return [{"기관명": "강릉시자살예방센터", "전화": "033-651-9668",
-                     "주소": "강원 강릉시 남구길23번길 24", "유형": "기초 자살예방센터"}]
+            return [{"기관명": "○○시자살예방센터", "전화": "033-000-0000",
+                     "주소": "강원특별자치도 ○○시 ○○로 00", "유형": "기초 자살예방센터"}]
 
     monkeypatch.setattr(settings, "HOTLINE_CONTAINER", "kfsp_centers")
     monkeypatch.setattr(policy, "_get_hotline_container", lambda: _FakeContainer())
     out = policy.lookup_regional_hotlines("강원특별자치도")
-    assert out == [{"name": "강릉시자살예방센터", "phone": "033-651-9668",
-                    "address": "강원 강릉시 남구길23번길 24", "type": "기초 자살예방센터"}]
+    assert out == [{"name": "○○시자살예방센터", "phone": "033-000-0000",
+                    "address": "강원특별자치도 ○○시 ○○로 00", "type": "기초 자살예방센터"}]
 
 
 def test_region_resolver_precedence(monkeypatch):
