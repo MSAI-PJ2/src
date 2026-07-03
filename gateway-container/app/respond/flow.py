@@ -219,8 +219,9 @@ def default_text_input_meta(input_meta: dict[str, Any] | None = None) -> dict[st
 #   2. 라벨 가산점 — 이번 발화의 인지왜곡 라벨과 관련된 기법 문서에 +RERANK_BIAS_WEIGHT
 #   3. 중복 제거 후 상위 top_n 개만 반환
 # 가산점 발동 조건은 환경변수 노브로 조정 (settings.py 의 RERANK_BIAS_* 참고):
-#   score(확신 점수 — 단일라벨 softmax 기준, 현행) | selected(분류기 서버의
-#   라벨별 캘리브레이션 판정 — multi_label 권장) | either(둘 중 하나라도)
+#   score(확신 점수, 기본) | selected | either
+#   ※ cogdist v2 부터 primary 는 항상 selected=true — selected 소스는 왜곡 발화에
+#     무조건 발동하므로 신뢰도 게이트가 필요하면 score 소스(+0.55)를 쓴다
 # ══════════════════════════════════════════════════════════════════════════
 
 def _bias_eligible(primary: str, confidence: float, cls_labels: list[dict] | None) -> bool:

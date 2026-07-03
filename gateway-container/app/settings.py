@@ -48,9 +48,11 @@ RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "4"))
 # 라벨 일치 문서 가산점의 크기와 발동 조건 (기본값 = 현행 동작, respond/flow.py 구획 3 참고)
 RERANK_BIAS_WEIGHT = float(os.getenv("RERANK_BIAS_WEIGHT", "0.3"))
 RERANK_BIAS_MIN_CONFIDENCE = float(os.getenv("RERANK_BIAS_MIN_CONFIDENCE", "0.5"))
-# 발동 판정 기준: score(확신 점수 — 단일라벨 softmax 기준, 현행)
-#               | selected(분류기 서버의 라벨별 캘리브레이션 판정 — multi_label 모델 권장)
-#               | either(둘 중 하나라도)
+# 발동 판정 기준: score(확신 점수 기준, 현행 기본) | selected | either
+# ※ cogdist v2(ml/cogdist-server)부터 primary 라벨은 항상 selected=true 로 오므로
+#   selected 소스는 왜곡 발화에 무조건 발동한다(신뢰도 게이트 없음).
+#   v2 multi 모델에서는 score 소스 + RERANK_BIAS_MIN_CONFIDENCE=0.55(서버 threshold와
+#   동일값) 권장 — 저확신 primary(예: 0.43)에 가산점이 붙는 것을 막는다.
 RERANK_BIAS_SOURCE = os.getenv("RERANK_BIAS_SOURCE", "score").strip().lower()
 
 # --- 컨텍스트 정책: 저확신 강등 하한 ---

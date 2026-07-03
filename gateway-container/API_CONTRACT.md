@@ -1,6 +1,6 @@
 # API Gateway API 계약서
 
-이 문서는 Azure Container Apps `api-gateway`의 API/SSE 계약 정리본이다. 2026-07-01 기준 Azure 실배포 테스트 결과와 `gateway-container/services` 구조를 반영한다.
+이 문서는 Azure Container Apps `api-gateway`의 API/SSE 계약 정리본이다. 2026-07-02 기준. 게이트웨이 평탄화 구조와 cogdist v2(ml/cogdist-server) 계약을 반영한다.
 
 ## 1. 기준 상태
 
@@ -144,9 +144,9 @@ POST /v1/classify
 {
   "text": "사람들 앞에 서면 다 망칠 것 같아요",
   "mode": "multi_label",
-  "model": "klue/roberta-base",
+  "model": "klue/roberta-large",
   "model_version": "multi_large_v2",
-  "threshold": 0.5,
+  "threshold": 0.55,
   "primary": "불충분",
   "labels": [
     {"label":"불충분", "score":0.5244, "selected":true}
@@ -163,7 +163,10 @@ model/model_version: cogdistmodel이 반환한 모델 식별 정보.
 threshold: selected 판정 기준.
 primary: Gateway가 RAG/LLM 프롬프트에 사용하는 대표 분류 라벨.
 labels: 전체 라벨별 점수 목록.
-selected: threshold 기준으로 선택된 라벨 여부.
+selected: v2 배타 규칙으로 정리된 선택 여부 —
+  ① primary 는 항상 selected=true
+  ② primary 가 정상/불충분이면 그 라벨 하나만 true
+  ③ primary 가 왜곡 라벨이면 정상/불충분은 false, 다른 왜곡은 score>=threshold
 ```
 
 주의:
@@ -180,7 +183,8 @@ selected: threshold 기준으로 선택된 라벨 여부.
 **지금은 그 역할이 분류기 서버로 이동했다:**
 
 ```text
-정규화(canonical 형태 만들기)  → cogdist 서버 (services/cogdist app/model.py 의 _score_one)
+정규화(canonical 형태 만들기)  → cogdist v2 서버 (ml/cogdist-server/app/model.py 의 _score_one
+                                 + selection_policy.py 의 정상/불충분 배타 selected 정리)
 게이트웨이                     → 위 응답 구조를 검증(strict)만 한다 (app/services/classifier.py)
 ```
 
