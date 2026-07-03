@@ -211,60 +211,126 @@ CRISIS_MESSAGE = (
 # 지역 연락처를 전국 공통 앞에 최대 몇 개까지 붙일지 (사람 편집)
 REGIONAL_HOTLINES_MAX = 3
 
+# 배포 DB(kfsp_centers)의 한글 필드 → 프론트로 나가는 영문 키 매핑.
+# 스키마가 바뀌면 이 표만 고치면 된다 (파티션키=시도, hours 필드는 없어 주소로 대체).
+KFSP_FIELD_MAP = {"name": "기관명", "phone": "전화", "address": "주소", "type": "유형"}
+
 _hotline_container = None  # Cosmos 컨테이너 — 첫 조회 때 1회 생성해 재사용
+_profile_container = None  # user_profiles 컨테이너 — region DB 조회 루트용
+
+
+def _get_cosmos_client():
+    """세션 저장소와 같은 Cosmos 계정(COSMOS_*)에 접속. 이 기능을 켠 경우에만 SDK 를 import."""
+    from azure.cosmos import CosmosClient
+
+    conn = os.getenv("COSMOS_CONNECTION_STRING", "")
+    if conn:
+        return CosmosClient.from_connection_string(conn)
+    endpoint, key = os.getenv("COSMOS_ENDPOINT", ""), os.getenv("COSMOS_KEY", "")
+    if not endpoint or not key:
+        raise ValueError("Cosmos 조회에는 COSMOS_ENDPOINT + COSMOS_KEY (또는 COSMOS_CONNECTION_STRING) 필요")
+    return CosmosClient(endpoint, credential=key)
 
 
 def _get_hotline_container():
-    """지역 연락처 Cosmos 컨테이너 연결. 세션 저장소와 같은 계정(COSMOS_*)을 쓰고
-    컨테이너 이름만 HOTLINE_CONTAINER 로 지정한다 (파티션 키 = /region 권장)."""
+    """지역 연락처 컨테이너 연결. 컨테이너 이름만 HOTLINE_CONTAINER 로 지정한다.
+    배포 DB 는 kfsp_centers (파티션키 /시도)."""
     global _hotline_container
     if _hotline_container is None:
-        from azure.cosmos import CosmosClient  # cosmos 는 이 기능을 켠 경우에만 필요
-
-        conn = os.getenv("COSMOS_CONNECTION_STRING", "")
-        if conn:
-            client = CosmosClient.from_connection_string(conn)
-        else:
-            endpoint, key = os.getenv("COSMOS_ENDPOINT", ""), os.getenv("COSMOS_KEY", "")
-            if not endpoint or not key:
-                raise ValueError("hotline lookup requires COSMOS_ENDPOINT + COSMOS_KEY (or COSMOS_CONNECTION_STRING)")
-            client = CosmosClient(endpoint, credential=key)
         database = settings.HOTLINE_DATABASE or os.getenv("COSMOS_DATABASE", "")
         if not database:
             raise ValueError("hotline lookup requires HOTLINE_DATABASE or COSMOS_DATABASE")
-        _hotline_container = client.get_database_client(database) \
-                                   .get_container_client(settings.HOTLINE_CONTAINER)
+        _hotline_container = _get_cosmos_client().get_database_client(database) \
+                                                 .get_container_client(settings.HOTLINE_CONTAINER)
     return _hotline_container
 
 
-def lookup_regional_hotlines(region: str | None) -> list[dict]:
-    """내담자 지역의 상담기관 연락처 조회 (블로킹 — crisis_payload 가 to_thread 로 감싼다).
+def lookup_regional_hotlines(region: str | None, district: str | None = None) -> list[dict]:
+    """내담자 지역(시도)의 상담기관 연락처 조회 (블로킹 — crisis_payload 가 to_thread 로 감싼다).
 
-    구현 완료·기본 잠금 상태: HOTLINE_CONTAINER 설정이 비어 있으면 빈 목록(기능 꺼짐).
-    켜는 법: ① Cosmos 에 컨테이너 생성(예: hotline-directory, 파티션키 /region)
-            문서 예 {"region":"서울특별시 강남구","name":"강남구 정신건강복지센터",
-                     "phone":"02-...","hours":"평일 09-18시"}
-           ② .env 에 HOTLINE_CONTAINER=hotline-directory
-           ③ 프론트가 요청의 metadata.region 에 지역명을 넣어 보내면 끝.
+    구현 완료·기본 잠금 상태: HOTLINE_CONTAINER 가 비어 있으면 빈 목록(기능 꺼짐).
+    켜는 법: ① .env 에 HOTLINE_CONTAINER=kfsp_centers
+            ② 프론트가 요청 metadata.region 에 정규 시도명("서울특별시" 등)을 넣어 보내면 끝.
+    배포 DB(kfsp_centers) 문서 예: {"시도":"강원특별자치도","시군구":"강릉시",
+        "기관명":"강릉시자살예방센터","전화":"033-651-9668","주소":"강원 강릉시 ..."}
+
+    district(시군구): 지금은 껍데기(seam) — 값이 오면 시도 안에서 한 번 더 좁힌다.
+        위치 기반 기능이 생기기 전까지는 보통 None 이라 시도 단위로만 조회한다.
     """
     region = (region or "").strip()
     if not settings.HOTLINE_CONTAINER or not region:
         return []
+    # 파티션 키(시도) 조회 — 지역 하나만 읽는 가장 싼 쿼리. 한글 필드라 c["필드"] 표기.
+    query = 'SELECT c["기관명"], c["전화"], c["주소"], c["유형"] FROM c WHERE c["시도"] = @region'
+    params = [{"name": "@region", "value": region}]
+    district = (district or "").strip()
+    if district:  # 껍데기: 시군구까지 좁힘 (도 지역에서 인접 시·군 잡음을 줄이려는 용도)
+        query += ' AND c["시군구"] = @district'
+        params.append({"name": "@district", "value": district})
     rows = _get_hotline_container().query_items(
-        query="SELECT c.name, c.phone, c.hours FROM c WHERE c.region = @region",
-        parameters=[{"name": "@region", "value": region}],
-        partition_key=region,  # 파티션 키 조회 — 지역 하나만 읽는 가장 싼 쿼리
-    )
+        query=query, parameters=params, partition_key=region)
     out = []
     for row in rows:
-        out.append({"name": row.get("name", ""), "phone": row.get("phone", ""),
-                    "hours": row.get("hours", "")})
+        out.append({key: row.get(field, "") for key, field in KFSP_FIELD_MAP.items()})
         if len(out) >= REGIONAL_HOTLINES_MAX:
             break
     return out
 
 
-async def crisis_payload(reason: str | None = None, region: str | None = None) -> dict:
+# --- region DB 조회 루트: user_profiles 에서 저장된 지역을 읽는다 (metadata.region 다음 우선순위) ---
+
+def _get_profile_container():
+    """사용자 프로필 컨테이너 연결 (파티션키 /user_id). 배포 DB 는 user_profiles."""
+    global _profile_container
+    if _profile_container is None:
+        database = settings.USER_PROFILE_DATABASE or os.getenv("COSMOS_DATABASE", "")
+        if not database:
+            raise ValueError("profile lookup requires USER_PROFILE_DATABASE or COSMOS_DATABASE")
+        _profile_container = _get_cosmos_client().get_database_client(database) \
+                                                 .get_container_client(settings.USER_PROFILE_CONTAINER)
+    return _profile_container
+
+
+def _region_from_profile(user_id: str) -> tuple[str | None, str | None]:
+    """user_profiles 에서 (시도, 시군구) 를 읽는다. 없으면 (None, None) — 블로킹.
+
+    user_profiles 가 비어 있으면 자연히 (None, None) 을 돌려주므로, 프로필이 채워지기 전까지
+    이 경로는 조용히 휴면한다 (죽은 코드가 아니라 데이터 대기 상태)."""
+    rows = _get_profile_container().query_items(
+        query='SELECT c["시도"], c["시군구"] FROM c WHERE c["user_id"] = @uid',
+        parameters=[{"name": "@uid", "value": user_id}],
+        partition_key=user_id)
+    for row in rows:
+        return (row.get("시도") or None, row.get("시군구") or None)
+    return (None, None)
+
+
+def resolve_region(input_meta: dict, user_id: str | None = None) -> tuple[str | None, str | None]:
+    """이번 요청의 (시도, 시군구) 를 정한다 — 우선순위 체인.
+
+    1순위: metadata.region / metadata.district (프론트 명시 override, 테스트·MVP 경로)
+    2순위: user_profiles DB 조회 (user_id 있고 USER_PROFILE_CONTAINER 켜졌을 때)
+    "정리" 시점: 위치 기반/프로필이 정식화되면 1순위 override 를 테스트 전용으로 강등하고
+                2순위를 승격 — 코드 삭제 없이 우선순위만 바꾸면 된다.
+
+    ※ user_id 는 아직 route(Entra oid)→flow 로 배선되지 않았다. 그전까지 2순위는 휴면이며,
+      배선 검증은 tests/test_v1_contract.py 의 계약 테스트가 가짜 프로필로 대신한다.
+    """
+    meta = input_meta.get("metadata") or {}
+    region = (meta.get("region") or "").strip() or None
+    district = (meta.get("district") or "").strip() or None
+    if region:
+        return (region, district)
+    if user_id and settings.USER_PROFILE_CONTAINER:
+        try:
+            return _region_from_profile(user_id)
+        except Exception as exc:
+            logger.warning("프로필 지역 조회 실패 — 지역 없이 진행: %s", exc)
+    return (None, None)
+
+
+async def crisis_payload(reason: str | None = None, region: str | None = None,
+                         district: str | None = None) -> dict:
     """프론트로 보낼 위기 이벤트 한 덩어리 (flow.respond_stream 이 LLM 대신 이것을 출력).
 
     지역 조회는 어떤 경우에도 위기 응답을 막지 못한다 — 실패·타임아웃이면
@@ -275,7 +341,7 @@ async def crisis_payload(reason: str | None = None, region: str | None = None) -
         try:
             # 블로킹 Cosmos 조회를 스레드로 오프로딩 + 상한시간 초과 시 포기
             regional = await asyncio.wait_for(
-                asyncio.to_thread(lookup_regional_hotlines, region),
+                asyncio.to_thread(lookup_regional_hotlines, region, district),
                 timeout=settings.HOTLINE_TIMEOUT_SECONDS)
         except Exception as exc:
             logger.warning("지역 연락처 조회 실패 — 전국 공통 창구만 출력: %s", exc)

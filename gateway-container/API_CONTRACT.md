@@ -477,22 +477,36 @@ meta -> crisis -> done
 
 ### 위치 기반 유관기관 연락처 (코드 구현됨, 설정만으로 켜짐)
 
-프론트가 요청에 지역명을 넣어 보내면, 해당 지역 상담기관이 전국 공통 창구 **앞에** 붙는다:
+지역(시도)이 정해지면 해당 지역 상담기관이 전국 공통 창구 **앞에** 붙는다:
 
 ```json
 {
   "text": "...",
-  "metadata": {"region": "서울특별시 강남구"}
+  "metadata": {"region": "강원특별자치도"}
 }
 ```
 
 ```text
 resources = [지역 창구(최대 3)... , 전국 공통 3종]
+지역 창구 항목: {"name","phone","address","type"}   (배포 DB kfsp_centers 기준)
+전국 공통 항목: {"name","phone","hours"}
+→ 공통 키는 name·phone. 프론트는 이 둘만 있으면 렌더 가능하도록 작성한다.
 ```
 
-서버 설정: 세션과 같은 Cosmos 계정에 연락처 컨테이너(파티션키 /region,
-문서 {"region","name","phone","hours"})를 만들고 `HOTLINE_CONTAINER=<컨테이너명>` 지정.
-설정이 없거나 region 미전송, 조회 실패/타임아웃(기본 3초)이면 — 어떤 경우에도
+**region 결정 우선순위** (`resolve_region`):
+
+```text
+1) metadata.region / metadata.district   프론트 명시 override (현행 MVP·테스트 경로)
+2) user_profiles DB 조회                  user_id 있고 USER_PROFILE_CONTAINER 켜졌을 때
+                                          (user_id 배선 전까지 휴면 — 데이터 대기)
+```
+
+- `region` 은 **정규 시도명**("서울특별시"·"강원특별자치도" 등, DB 값과 정확히 일치)이어야 한다.
+- `metadata.district`(시군구)는 seam — 값이 오면 시도 안에서 한 번 더 좁힌다. 현행은 보통 생략.
+
+서버 설정: 세션과 같은 Cosmos 계정의 `kfsp_centers`(파티션키 `/시도`, 필드 기관명·전화·주소·시도·시군구)를
+`HOTLINE_CONTAINER=kfsp_centers` 로 지정. 프로필 경로를 쓰려면 `USER_PROFILE_CONTAINER=user_profiles`.
+설정이 없거나 region 미확정, 조회 실패/타임아웃(기본 3초)이면 — 어떤 경우에도
 위기 응답은 실패하지 않고 전국 공통 창구만 반환된다.
 
 ## 14. Session API와 Cosmos DB 계약
