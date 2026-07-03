@@ -8,6 +8,9 @@ __pycache__/
 .vscode/
 .idea/
 
+# Graphify code-graph analysis output (regenerate with `graphify update .`)
+graphify-out/
+
 # Secrets
 *.key
 *.pem
