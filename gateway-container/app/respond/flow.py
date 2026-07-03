@@ -398,10 +398,13 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls))
 
     # 4) 위기 분기: LLM 답변 생성 없이 고정 메시지 + 상담 핫라인을 즉시 출력하고 종료
-    #    프론트가 metadata.region 을 보냈고 지역 연락처 DB 가 켜져 있으면 지역 창구를 앞에 붙인다
+    #    지역(시도)이 정해지고 지역 연락처 DB 가 켜져 있으면 지역 창구를 전국 공통 앞에 붙인다.
+    #    region 은 metadata.region(현행) → user_profiles(휴면) 순으로 resolve_region 이 정한다.
+    #    user_id 배선(Entra oid→flow)은 다음 단계라 지금은 None → 프로필 경로 휴면.
     if policy.is_crisis:
-        region = (input_meta.get("metadata") or {}).get("region")
-        payload = await respond_policy.crisis_payload(reason=safety.get("reason"), region=region)
+        region, district = respond_policy.resolve_region(input_meta, user_id=None)
+        payload = await respond_policy.crisis_payload(
+            reason=safety.get("reason"), region=region, district=district)
         yield sse(payload)
         await session_repository.append_turn(session_id, crisis_turn(payload))
         if tts and tts.get("enabled"):

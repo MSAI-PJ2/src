@@ -62,9 +62,17 @@ POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
 
 # --- 위기 지역 연락처 DB (respond/policy.py 구획 3) ---
 # HOTLINE_CONTAINER 를 채우면 켜짐 — 세션과 같은 Cosmos 계정(COSMOS_*)을 쓴다.
+# 실제 배포 DB 예: 컨테이너 kfsp_centers (파티션키 /시도, 필드 기관명·전화·주소·시도·시군구).
 HOTLINE_CONTAINER = os.getenv("HOTLINE_CONTAINER", "")
 HOTLINE_DATABASE = os.getenv("HOTLINE_DATABASE", "")            # 비우면 COSMOS_DATABASE 사용
 HOTLINE_TIMEOUT_SECONDS = float(os.getenv("HOTLINE_TIMEOUT_SECONDS", "3"))  # 초과 시 전국 공통만
+
+# --- 사용자 프로필 DB (respond/policy.py 구획 3 의 region DB 조회 루트) ---
+# USER_PROFILE_CONTAINER 를 채우면 region 을 프로필에서도 조회한다(우선순위는 metadata.region 이 위).
+# 예: 컨테이너 user_profiles (파티션키 /user_id, 필드 시도·시군구). 비어 있으면 이 경로는 휴면.
+USER_PROFILE_CONTAINER = os.getenv("USER_PROFILE_CONTAINER", "")
+USER_PROFILE_DATABASE = os.getenv("USER_PROFILE_DATABASE", "")  # 비우면 COSMOS_DATABASE 사용
+USER_PROFILE_TIMEOUT_SECONDS = float(os.getenv("USER_PROFILE_TIMEOUT_SECONDS", "3"))
 
 # --- 세션(대화 기록) 저장소: memory(개발/테스트용, 서버 재시작 시 소멸) | cosmos(운영 DB) ---
 SESSION_REPOSITORY = os.getenv("SESSION_REPOSITORY", "memory")
