@@ -10,7 +10,8 @@ Part of the **생각갈피 (MindMark)** CBT chatbot multimodal input pipeline. T
 
 ```
 di/
-├── kakao_ocr_pipeline.py   # Main OCR + parsing pipeline
+├── kakao_ocr_pipeline.py   # Standalone OCR pipeline (local use only)
+├── test_client.py          # Server test client with user-friendly output
 ├── .env                    # Local credentials (not committed)
 └── di_test_image.jpeg      # Sample KakaoTalk screenshot for testing (not committed)
 ```
@@ -30,7 +31,9 @@ Speaker assignment (x-coordinate midpoint)
         ↓  "나" (right side) / sender name (left side)
 Timestamp matching (y-coordinate proximity)
         ↓
-conversation_output.json
+Structured conversation log
+        ↓
+Cognitive distortion classifier (ml/)
 ```
 
 ### Speaker Detection Logic
@@ -51,7 +54,7 @@ Timestamps ("오전 11:15", "오후 3:42") are matched to their nearest message 
 ### 1. Install dependencies
 
 ```bash
-pip install azure-ai-documentintelligence python-dotenv
+pip install azure-ai-documentintelligence python-dotenv httpx
 ```
 
 ### 2. Configure `.env`
@@ -71,84 +74,118 @@ DOCINTEL_MODEL_ID=prebuilt-read
 
 ## Usage
 
-### Run with default test image
+### Option A — Standalone OCR (local, no server needed)
+
+Uses `kakao_ocr_pipeline.py` directly with Azure Document Intelligence.
 
 ```bash
-python kakao_ocr_pipeline.py
+# Run with default test image (di_test_image.jpeg)
+python3 kakao_ocr_pipeline.py
+
+# Run with a specific image
+python3 kakao_ocr_pipeline.py kakao_capture.jpeg
 ```
 
-Defaults to `di_test_image.jpeg` in the same folder.
+Output: prints reconstructed conversation and saves `conversation_output.json`.
 
-### Run with a specific image
+---
+
+### Option B — Server test client (requires gateway server running)
+
+Uses `test_client.py` to send the image to the API gateway server and display
+the full pipeline result (OCR → safety check → distortion classification → LLM response)
+in a user-friendly format.
+
+#### Step 1: Start the gateway server (Terminal 1 — do not close)
 
 ```bash
-python kakao_ocr_pipeline.py kakao_capture.jpeg
+cd ~/Desktop/MSAI2/src/gateway-container
+uvicorn app.main:app --reload --port 8000
 ```
 
-### Output
+Wait for `Application startup complete.` before proceeding.
 
-Prints the reconstructed conversation to the terminal and saves `conversation_output.json`:
+#### Step 2: Run the test client (Terminal 2)
+
+```bash
+cd ~/Desktop/MSAI2/src/di
+
+# Analyze a KakaoTalk screenshot
+python3 test_client.py --doc di_test_image.jpeg
+
+# Send text directly
+python3 test_client.py "요즘 뭘 해도 안 될 것 같고 다 내 잘못인 것 같아"
+
+# Continue a previous conversation (multi-turn)
+python3 test_client.py "추가 질문" --session <session-id>
+
+# With API key (if server requires it)
+python3 test_client.py --doc di_test_image.jpeg --api-key <your-key>
+
+# With TTS enabled
+python3 test_client.py --doc di_test_image.jpeg --tts
+```
+
+#### Example output
 
 ```
-[오전 11:15] 감동받은 어피치: 야 오늘 과제 제출했어?
-[오전 11:15] 나: 응 아까 냈어.
-[오전 11:15] 감동받은 어피치: 오 다행이다 크크
-...
-```
+📸  이미지 파일: di_test_image.jpeg
+🌐  서버: http://localhost:8000/v1/respond
+=======================================================
+⏳  카톡 대화 인식 중...
+✅  인식 완료 — 총 9개 메시지
 
-`conversation_output.json` format:
+┌─ 인식된 카톡 대화 ──────────────────────────────────
+│  [오전 11:15]  감동받은 어피치: 야 오늘 과제 제출했어?
+│                          응 아까 냈어.  [오전 11:15]
+│  [오전 11:15]  감동받은 어피치: 오 다행이다 크크
+└─────────────────────────────────────────────────────
 
-```json
-[
-  {
-    "speaker": "감동받은 어피치",
-    "content": "야 오늘 과제 제출했어?",
-    "time": "오전 11:15"
-  },
-  {
-    "speaker": "나",
-    "content": "응 아까 냈어.",
-    "time": "오전 11:15"
-  }
-]
+┌─ 인지왜곡 분석 결과 ────────────────────────────────
+│  주요 판정: 불충분 — 문맥이 짧아 판단하기 어려운 발화
+│
+│  전체 라벨 확률:
+│    불충분       ███████████████  95.7%
+│    정상         █░░░░░░░░░░░░░░   7.4%
+└─────────────────────────────────────────────────────
+
+🤖  AI 응답:
+대화 내용을 보니...
+
+=======================================================
+✔   완료  |  세션 ID: ae7d5db3-...
+=======================================================
 ```
 
 ---
 
-## Key Functions
+## Cognitive Distortion Labels
 
-| Function | Description |
+| Label | Description |
 |---|---|
-| `analyze_image(image_path)` | Calls Azure Document Intelligence API, returns page width/height and line list with polygons |
-| `is_time_stamp(text)` | Detects Korean time strings (`오전/오후 HH:MM`) via regex |
-| `classify_speaker(polygon, page_width)` | Assigns speaker based on x-coordinate midpoint |
-| `parse_lines(page_data, known_sender_names)` | Classifies each OCR line as `message`, `timestamp`, or `sender_name` |
-| `build_conversation(parsed_lines)` | Reconstructs ordered conversation with speaker + timestamp matched per message |
-| `run_pipeline(image_path, known_sender_names)` | End-to-end entry point: image → `conversation_output.json` |
-
----
-
-## Customizing for Different Chats
-
-By default, the pipeline is configured for a test conversation. To use with a different KakaoTalk screenshot, update the `known_names` set in `__main__` to match the other person's display name as it appears at the top of their chat bubbles:
-
-```python
-known_names = {"친구이름"}  # Replace with the actual sender name shown in the screenshot
-run_pipeline(image_path, known_sender_names=known_names)
-```
+| 정상 | No cognitive distortion detected |
+| 불충분 | Insufficient context to determine distortion |
+| '해야 한다' 진술 | Should/Must statements |
+| 감정적 추론 | Treating emotions as facts |
+| 개인화 | Blaming oneself for everything |
+| 과잉 일반화 | Overgeneralizing from one event |
+| 긍정 축소화 | Discounting positive experiences |
+| 낙인찍기 | Attaching negative labels to self or others |
+| 부정적 편향 | Focusing only on the negative |
+| 성급한 판단 | Jumping to conclusions without evidence |
+| 확대와 축소 | Magnifying negatives, minimizing positives |
+| 흑백 사고 | All-or-nothing thinking |
 
 ---
 
 ## Integration with Cognitive Distortion Classifier
 
-The `conversation_output.json` produced by this pipeline is the direct input to `ml/classify_conversation.py`:
-
 ```bash
-# Step 1: OCR
-python di/kakao_ocr_pipeline.py kakao_capture.jpeg
+# Step 1: OCR (standalone)
+python3 di/kakao_ocr_pipeline.py kakao_capture.jpeg
 
 # Step 2: Classification
-python ml/classify_conversation.py \
+python3 ml/classify_conversation.py \
     --conversation di/conversation_output.json \
     --model_dir ml/outputs/multi_large/best \
     --output conversation_classified.json
@@ -161,4 +198,5 @@ python ml/classify_conversation.py \
 ```
 azure-ai-documentintelligence
 python-dotenv
+httpx
 ```
