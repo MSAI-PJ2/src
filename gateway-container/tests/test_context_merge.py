@@ -57,6 +57,22 @@ def test_novelty_state_reversal_rejected():
     assert context_merge.novelty("오늘 기분 진짜 괜찮아요.", [ANCHOR])
 
 
+def test_novelty_anaphora_override():
+    """e2e 검증 반영: '그 생각/그 일' 같은 지시 조응은 새 명사(잠)가 있어도 이어말하기다.
+
+    배포 실험에서 병합의 대표 수혜 사례("그 생각만 하면 잠이 안 와요")가
+    주변 명사에 걸려 기각됐던 것을 고치는 규칙 — 조응 마커 = 직전 담화 지시 확정.
+    """
+    assert context_merge.novelty("그 생각만 하면 잠이 안 와요.", ["다음 주에 승진 발표가 있어요."]) == []
+    assert context_merge.novelty("그 일 이후로 계속 그래요.", [ANCHOR]) == []
+
+
+def test_novelty_e2e_rejected_continuations_now_pass():
+    """e2e 검증 반영: 배포에서 기각됐던 실제 이어말하기 2건 — '탓'과 '같아' 흡수로 통과."""
+    assert context_merge.novelty("제 탓이에요.", ["이번 프로젝트가 실패해서 커리어가 망했다는 생각이 들어요."]) == []
+    assert context_merge.novelty("그런 것 같아요.", ["요즘 계속 무기력해요."]) == []
+
+
 def test_merge_text_keeps_current_and_trims_oldest():
     """길이 상한 초과 시 오래된 맥락부터 버리고, 현재 발화는 절대 자르지 않는다."""
     old, recent, current = "가" * 100, "나" * 100, "다" * 50
