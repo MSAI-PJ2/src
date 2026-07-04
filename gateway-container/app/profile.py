@@ -1,14 +1,14 @@
 """[프로필] 사용자 프로필(설문·지역) 저장소 — memory/Cosmos 구현 + 설문 반영 규칙.
 
-프로필 = 사용자 한 명의 설정 문서. 가구현 로그인(가상 ID — api/v1.py 구획 2)과 짝이다:
-    {user_id, nickname, 시도, 시군구, location, emergency_contact, survey, privacy,
-     survey_completed, created_at, updated_at}
+프로필 = 사용자 한 명의 설정 문서. 가구현 로그인(가상 ID — api/v1.py 구획 2)과 짝이다.
+문서 형태는 배포 DB(user_profiles)의 실제 등록 문서와 1:1 (실 샘플 기준, 2026-07-04):
+    {id, user_id, email, nickname, location: {sido, sigungu}, emergency_contact,
+     survey, privacy, survey_completed, created_at, updated_at}
+문서 id = user_id, 파티션 키 = /user_id.
 
-왜 "시도/시군구" 한글 필드를 따로 두나:
-    위기 분기의 지역 핫라인 조회(respond/policy.py resolve_region → _region_from_profile)가
-    배포 DB(user_profiles)의 한글 필드를 읽도록 이미 설계돼 있다. 설문의
-    location.sido/sigungu 를 저장할 때 이 두 필드로 "미러"해 두면, 설문만 저장돼도
-    위기 시 지역 창구 안내가 그대로 살아난다 (지역 조회 코드는 수정 불필요).
+지역은 location.sido/sigungu 를 그대로 저장하고, 위기 분기의 지역 핫라인 조회
+(respond/policy.py resolve_region → _region_from_profile)도 이 필드를 직접 읽는다
+— 이미 등록된 프로필 문서가 그 형태라서, 별도 변환 없이 바로 동작한다.
 
 저장 백엔드: 세션과 같은 스위치(SESSION_REPOSITORY)를 따른다 — 저장소 모드 노브 하나로 통일.
     memory(기본)  개발/테스트용. 서버 메모리에 저장, 재시작 시 소멸.
@@ -48,6 +48,7 @@ class ProfileRepository(Protocol):
 def _new_doc(user_id: str) -> dict[str, Any]:
     now = now_ts()
     return {"id": user_id, "user_id": user_id,          # id=user_id (Cosmos 문서 id 겸용)
+            "email": None,                              # 정식 로그인 도입 시 채워질 자리 (실 스키마 필드)
             "survey_completed": False,
             "created_at": iso(now), "updated_at": iso(now)}
 
@@ -55,17 +56,13 @@ def _new_doc(user_id: str) -> dict[str, Any]:
 def _apply_survey(item: dict[str, Any], payload: dict[str, Any]) -> None:
     """설문 페이로드를 프로필 문서에 반영한다 (제자리 수정).
 
-    - 최상위 필드는 온 것만 덮어쓴다 (부분 재제출 허용).
-    - location.sido/sigungu 는 한글 필드 시도/시군구로 미러 → 위기 지역 조회가 읽는 계약.
+    - 최상위 필드는 온 것만 덮어쓴다 (부분 재제출 허용). location 은 실 스키마 그대로
+      {sido, sigungu} 형태로 저장된다 — 위기 지역 조회가 이 필드를 직접 읽는다.
     - survey_completed=True: 프론트(로그인 페이지)가 설문 완료 여부를 이 플래그로 판단한다.
     """
     for key in _SURVEY_FIELDS:
         if payload.get(key) is not None:
             item[key] = payload[key]
-    location = payload.get("location") or {}
-    if location.get("sido"):
-        item["시도"] = location["sido"]
-        item["시군구"] = location.get("sigungu") or None
     item["survey_completed"] = True
     item["updated_at"] = iso(now_ts())
 

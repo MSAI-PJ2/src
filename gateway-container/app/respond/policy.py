@@ -284,12 +284,13 @@ def _region_from_profile(user_id: str) -> tuple[str | None, str | None]:
     """프로필 저장소에서 (시도, 시군구) 를 읽는다. 없으면 (None, None) — 블로킹 가능.
 
     저장소(app/profile.py)를 경유한다 — memory(개발)든 Cosmos user_profiles(배포)든
-    같은 코드로 동작하고, 설문 저장(/v1/profile/survey)이 미러해 둔 한글 필드
-    시도/시군구를 그대로 읽는다. 프로필이 없으면 조용히 (None, None)."""
+    같은 코드로 동작한다. 지역은 실제 등록 문서의 형태 그대로 location.sido/sigungu
+    에서 읽는다 (설문 페이지가 저장하는 모양과 동일). 프로필이 없으면 조용히 (None, None)."""
     item = profile_repository.get(user_id)
     if not item:
         return (None, None)
-    return (item.get("시도") or None, item.get("시군구") or None)
+    location = item.get("location") or {}
+    return (location.get("sido") or None, location.get("sigungu") or None)
 
 
 def resolve_region(input_meta: dict, user_id: str | None = None) -> tuple[str | None, str | None]:
@@ -301,15 +302,17 @@ def resolve_region(input_meta: dict, user_id: str | None = None) -> tuple[str | 
                 2순위를 승격 — 코드 삭제 없이 우선순위만 바꾸면 된다.
 
     user_id 배선 완료(가구현 로그인): route(current_user) → flow → 여기까지 전달된다.
-    "anonymous"(가상 ID 미전송)는 공유 계정이라 프로필 지역을 쓰지 않는다 — 다른 사용자의
-    지역이 노출되는 사고 방지. 조회 실패는 경고만 남기고 지역 없이 진행(위기 응답 우선).
+    가구현 단계에서는 "이미 등록된 ID 면 동작"이 원칙이라 anonymous(가상 ID 미전송)도
+    등록된 프로필이 있으면 그 지역을 쓴다 — 단 anonymous 는 전 사용자가 공유하는
+    계정이므로, 다중 사용자 환경이 되면 프론트가 반드시 x-user-id 를 보내야 한다.
+    조회 실패는 경고만 남기고 지역 없이 진행한다 (위기 응답은 실패 금지가 최우선).
     """
     meta = input_meta.get("metadata") or {}
     region = (meta.get("region") or "").strip() or None
     district = (meta.get("district") or "").strip() or None
     if region:
         return (region, district)
-    if user_id and user_id != "anonymous":
+    if user_id:
         try:
             return _region_from_profile(user_id)
         except Exception as exc:

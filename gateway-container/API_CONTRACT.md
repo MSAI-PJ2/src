@@ -896,8 +896,9 @@ answer = "".join(answer_parts)
 ```text
 - 프론트엔드가 가상 ID(UUID 권장)를 "발급·보관"하고 매 요청 x-user-id 헤더로 보낸다.
 - 헤더가 있으면 그 값이 user_id — 프로필/설문/위기 지역 안내가 사용자별로 동작한다.
-- 헤더가 없으면 user_id = "anonymous" (하위 호환. 단 프로필이 전 사용자 공유가 되므로
-  프로필 기능을 쓰는 화면은 반드시 헤더를 보낼 것).
+- 헤더가 없으면 user_id = "anonymous" (하위 호환). 가구현 단일 사용자 데모에서는
+  anonymous 로도 전 기능이 동작하지만, anonymous 는 전 사용자 공유 계정이므로
+  다중 사용자 시연부터는 화면에서 반드시 헤더를 보낼 것.
 - 허용 형식: A-Z a-z 0-9 _ . -  (최대 64자). 위반 시 400.
 - AUTH_MODE=entra 로 전환하면 이 헤더는 무시되고 JWT 의 oid 가 user_id 가 된다
   → 프론트는 헤더 발급 로직을 로그인 토큰으로 바꾸기만 하면 됨 (서버 계약 동일).
@@ -947,9 +948,10 @@ def _headers():
 응답: 저장된 프로필 전체 + `survey_completed: true`.
 
 ```text
-서버가 해석하는 값은 location.sido/sigungu 뿐이다 — 프로필 문서의 한글 필드
-시도/시군구로 미러 저장되어, 이후 "위기 발화 + x-user-id" 요청에서 metadata.region
-없이도 프로필 지역으로 가까운 상담 창구를 안내한다 (우선순위: metadata.region > 프로필).
-나머지 필드는 보관만 하므로 프론트가 자유롭게 확장해도 서버 수정이 필요 없다.
-저장 위치: SESSION_REPOSITORY=memory 면 서버 메모리(개발), cosmos 면 user_profiles 컨테이너.
+서버가 해석하는 값은 location.sido/sigungu 뿐이다 (실 등록 문서 스키마 그대로 저장) —
+이후 위기 발화 시 metadata.region 없이도 프로필 지역으로 가까운 상담 창구를 안내한다
+(우선순위: metadata.region > 프로필). 가구현 단계에서는 이미 등록된 ID 면 anonymous 포함
+어떤 ID 든 동작한다. 나머지 필드는 보관만 하므로 프론트가 자유롭게 확장해도 서버 수정이
+필요 없다. 저장 위치: SESSION_REPOSITORY=memory 면 서버 메모리(개발), cosmos 면
+user_profiles 컨테이너(문서 id=user_id, 파티션 키 /user_id).
 ```

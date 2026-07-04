@@ -48,15 +48,16 @@ def test_profile_lifecycle_with_virtual_id(gateway):
     assert again["created_at"] == created["created_at"]
 
 
-def test_survey_saves_completes_and_mirrors_region(gateway):
+def test_survey_saves_completes_and_stores_location(gateway):
     client, _ = gateway
-    client.post("/v1/profile", headers=_h("u-3"))
+    created = client.post("/v1/profile", headers=_h("u-3")).json()
+    assert "email" in created                      # 실 스키마 패리티 (정식 로그인용 자리)
     saved = client.post("/v1/profile/survey", json=SURVEY, headers=_h("u-3")).json()
     # 완료 플래그 (프론트 로그인 페이지가 설문 완료 여부를 이 값으로 판단)
     assert saved["survey_completed"] is True
     assert saved["nickname"] == "테스트"
-    # 한글 지역 미러 — 위기 지역 조회(resolve_region)가 읽는 계약
-    assert saved["시도"] == "부산광역시" and saved["시군구"] == "해운대구"
+    # 지역은 실 등록 문서 스키마 그대로 — 위기 지역 조회(resolve_region)가 읽는 필드
+    assert saved["location"] == {"sido": "부산광역시", "sigungu": "해운대구"}
     # 재조회해도 동일 + 프로필 재생성(ensure)이 설문 완료를 되돌리지 않는다
     assert client.get("/v1/profile", headers=_h("u-3")).json()["survey_completed"] is True
     assert client.post("/v1/profile", headers=_h("u-3")).json()["survey_completed"] is True
@@ -132,12 +133,23 @@ def test_metadata_region_still_beats_profile(gateway, monkeypatch):
     assert calls == [("서울특별시", None)]
 
 
-def test_anonymous_never_reads_profile_region(gateway, monkeypatch):
-    """anonymous(가상 ID 미전송)는 공유 계정 — 프로필 지역을 쓰지 않는다 (타인 지역 노출 방지)."""
+def test_anonymous_registered_profile_also_works(gateway, monkeypatch):
+    """가구현 원칙: 이미 등록된 ID 면 동작 — 헤더 없이 저장된 anonymous 프로필도
+    위기 시 지역 안내에 쓰인다 (실 DB 의 등록 샘플이 user_id=anonymous)."""
     client, services = gateway
     monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
     calls = _arm_hotline_capture(monkeypatch)
 
     client.post("/v1/profile/survey", json=SURVEY)          # anonymous 로 설문 저장
     sse_events(client.post("/v1/respond", json={"text": "더 살 이유가 없는 것 같아요"}))
-    assert calls == []   # region 이 없으니 지역 조회 자체를 안 한다 (전국 공통만)
+    assert calls == [("부산광역시", "해운대구")]   # anonymous 프로필 지역으로 조회됨
+
+
+def test_no_profile_no_region_lookup(gateway, monkeypatch):
+    """프로필이 아예 없으면 지역 없이 전국 공통만 (조회 자체가 안 일어난다)."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    calls = _arm_hotline_capture(monkeypatch)
+    sse_events(client.post("/v1/respond", json={"text": "더 살 이유가 없는 것 같아요"},
+                           headers=_h("u-noprofile")))
+    assert calls == []   # region 없음 → crisis_payload 가 지역 조회를 건너뛴다
