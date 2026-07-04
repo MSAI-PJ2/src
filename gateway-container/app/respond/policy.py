@@ -65,23 +65,52 @@ POLICIES: dict[str, ContextPolicy] = {
     # "흑백 사고": ContextPolicy("dichotomous_deep", "cbt_label_guided", rag_top_n=6),
 }
 
-# [도입 예정] '불충분' 최근 N턴 재분류: 한 문장으로 판단이 안 되면 최근 사용자 발화
-# 여러 개를 이어붙여 다시 분류하고, 왜곡 라벨이 나오면 그 라벨의 정책을 적용하는 기능.
-# 구현 위치는 flow.respond_stream 의 resolve() 호출 직후. 분류기 호출이 1회 늘어나므로
-# 응답 지연을 확인한 뒤 도입한다.
+# '불충분' 완화 사다리 — 병합 재분류(flow 의 twopass)를 거치고도 '불충분'이 연속되면
+# 같은 질문을 되풀이하지 않고 단계적으로 태도를 바꾼다. 단계 수는 이번 턴 포함
+# 연속 횟수(ladder_step)이고, settings.INSUFFICIENT_ESCAPE_AFTER(기본 4)째부터는
+# "질문 자체를 멈추는" 수용·동행 모드다 — 4연속 불충분은 정보 부족이 아니라
+# 발화 회피 신호라는 실측(회피형 100% vs 비회피 0.9% 도달)에 근거한다.
+INSUFFICIENT_LADDER: dict[int, ContextPolicy] = {
+    1: POLICIES["불충분"],  # 1차: 현행 그대로 — 구체적으로 물어본다
+    2: ContextPolicy("insufficient_clarify_alt", "clarify_alt", use_rag=False),      # 2차: 다른 각도
+    3: ContextPolicy("insufficient_clarify_light", "clarify_light", use_rag=False),  # 3차: 부담 낮춤
+}
+# 4차(ESCAPE_AFTER)부터: 질문 중단 · 감정 반영 · 머무르기. RAG 도 쓰지 않는다
+ACCOMPANY_POLICY = ContextPolicy("insufficient_accompany", "accompany", use_rag=False)
 
 
-def resolve(safety: dict, classification: dict) -> ContextPolicy:
-    """안전검사 결과 + 대표 라벨(+확신 하한) → 이번 턴에 적용할 정책 하나를 고른다."""
+def resolve(safety: dict, classification: dict, ladder_step: int = 0) -> ContextPolicy:
+    """안전검사 결과 + 대표 라벨(+확신 하한) → 이번 턴에 적용할 정책 하나를 고른다.
+
+    ladder_step: 이번 턴 포함 연속 '불충분' 횟수 (flow 가 세션 기록으로 계산해 전달).
+                 0/1 이면 현행과 동일하게 동작한다 — 기존 호출부 호환.
+    """
     if not safety.get("safe", True):
         return CRISIS_POLICY
     primary = classification.get("primary", "")
-    # 저확신 강등: 왜곡 라벨인데 확신이 하한 미만이면 단정하지 않고 명확화로 (기본 꺼짐)
-    if settings.POLICY_MIN_CONFIDENCE > 0 and primary not in ("정상", "불충분", ""):
+    # 저확신 강등 — 멀티라벨의 구멍을 여기서 막는다 (2026-07-04 전수검수 확정 결함):
+    # 멀티라벨에서 primary 는 sigmoid argmax 라 threshold 검사를 받지 않는다. 즉 12라벨
+    # 전부 threshold(0.55) 미만인 "미검출" 발화도 argmax 왜곡이 primary 로 온다.
+    # 그래서 "왜곡으로 단정해도 되는가"의 하한을 라우팅에서 완성한다:
+    #   하한 = max(POLICY_MIN_CONFIDENCE, 분류기 응답의 threshold — 배포 0.55)
+    # 배포 실측 확신값은 0.8~0.99 대라 정상적인 왜곡 발화는 영향받지 않고,
+    # OOD/애매 발화(예: 최고점 0.41)만 단정 대신 clarify 로 강등된다.
+    if primary not in ("정상", "불충분", ""):
         confidence = next((l.get("score", 0.0) for l in classification.get("labels", [])
                            if l.get("label") == primary), 0.0)
-        if confidence < settings.POLICY_MIN_CONFIDENCE:
+        try:
+            model_threshold = float(classification.get("threshold") or 0.0)
+        except (TypeError, ValueError):
+            model_threshold = 0.0
+        if confidence < max(settings.POLICY_MIN_CONFIDENCE, model_threshold):
             return LOW_CONFIDENCE_POLICY
+    # 연속 '불충분'이면 사다리에서 단계에 맞는 정책을 고른다.
+    # ESCAPE_AFTER <= 0 은 사다리 전체 끔 (flow 가 ladder_step 을 0 으로 유지하지만
+    # 외부 호출자가 값을 넘겨도 안전하도록 여기서도 이중으로 막는다).
+    if primary == "불충분" and ladder_step >= 2 and settings.INSUFFICIENT_ESCAPE_AFTER > 0:
+        if ladder_step >= settings.INSUFFICIENT_ESCAPE_AFTER:
+            return ACCOMPANY_POLICY
+        return INSUFFICIENT_LADDER.get(ladder_step, INSUFFICIENT_LADDER[3])
     return POLICIES.get(primary, DEFAULT_POLICY)
 
 
@@ -153,21 +182,64 @@ def _rag(chunks: list[dict]) -> str:
     return f"\n\n{RAG_HEADER}\n" + "\n".join(f"- {c['content']}" for c in chunks)
 
 
-def build_cbt_label_guided(primary: str, chunks: list[dict]) -> str:
-    """기본 전략: 분류 라벨의 접근 지침 + 참고자료를 포함한 CBT 상담 프롬프트."""
+def build_cbt_label_guided(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
+    """기본 전략: 분류 라벨의 접근 지침 + 참고자료를 포함한 CBT 상담 프롬프트.
+
+    secondary: 멀티라벨 분류기가 primary 와 "함께 선택한" 부차 왜곡 라벨들
+    (flow 가 score 내림차순·상한 적용까지 끝내서 넘겨준다). 주 지침이 상담의
+    중심을 잡고, 보조 지침은 함께 관찰된 패턴을 참고로만 덧붙인다 — 인접
+    왜곡(예: 확대와 축소 ↔ 긍정 축소화)이 흔들려도 상담 방향이 안정되는 효과.
+    """
     guidance = LABEL_GUIDANCE.get(primary, DEFAULT_GUIDANCE)
-    return f"{_base()}\n\n[이번 발화의 분류] {primary}\n[접근 지침] {guidance}{_rag(chunks)}"
+    head = f"[이번 발화의 분류] {primary}"
+    if secondary:
+        head += f" (함께 관찰됨: {', '.join(secondary)})"
+    body = f"\n[접근 지침] {guidance}"
+    for label in secondary:
+        body += (f"\n[보조 지침 — {label}] {LABEL_GUIDANCE.get(label, DEFAULT_GUIDANCE)} "
+                 "(주 접근을 유지하며 참고만 합니다)")
+    return f"{_base()}\n\n{head}{body}{_rag(chunks)}"
 
 
-def build_supportive(primary: str, chunks: list[dict]) -> str:
-    """'정상' 발화용: 왜곡 교정 없이 지지·공감 중심."""
+def build_supportive(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
+    """'정상' 발화용: 왜곡 교정 없이 지지·공감 중심. (secondary 미사용)"""
     return f"{_base()}\n\n[접근 지침] 인지왜곡 교정을 시도하지 말고 지지·공감·감정 반영 중심으로 응답합니다.{_rag(chunks)}"
 
 
-def build_clarify(primary: str, chunks: list[dict]) -> str:
+def build_clarify(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
     """'불충분'/저확신 발화용: 단정하지 않고 상황을 더 물어보는 명확화 질문 중심."""
     return (f"{_base()}\n\n[접근 지침] 상황 정보가 부족합니다. 짧게 공감한 뒤, "
             "무슨 일이 있었는지 구체적으로 들려달라는 명확화 질문 중심으로 응답합니다.")
+
+
+# --- '불충분' 완화 사다리 2~4차 전략 (구획 1 의 INSUFFICIENT_LADDER 와 짝) ---
+# 같은 명확화 질문을 반복하면 취조처럼 느껴진다 — 단계마다 질문의 각도와 무게를 바꾼다.
+
+def build_clarify_alt(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
+    """2차: 직전에 물었던 것과 '다른 각도'로 접근한다 (상황을 물었으면 감정을, 감정을
+    물었으면 상황·시점을). 같은 질문의 반복이라는 인상을 지우는 게 목적."""
+    return (f"{_base()}\n\n[접근 지침] 조금 전에도 상황을 여쭤봤지만 아직 구체적인 "
+            "이야기가 나오지 않았습니다. 같은 질문을 반복하지 말고, 이전과 다른 각도에서 "
+            "하나만 물어봅니다 — 상황을 물었다면 이번엔 그때의 감정이나 몸의 반응을, "
+            "감정을 물었다면 언제부터였는지를. 질문은 한 개만, 부드럽게.")
+
+
+def build_clarify_light(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
+    """3차: 대답의 부담 자체를 낮춘다. 긴 설명을 요구하지 않는다."""
+    return (f"{_base()}\n\n[접근 지침] 내담자가 말을 아끼고 있습니다. 자세한 설명을 "
+            "요구하지 말고, 아주 가볍게 답할 수 있는 질문 하나로 낮춥니다 — "
+            "\"한 단어로도 괜찮아요\", \"예/아니오로만 답하셔도 돼요\" 같은 식으로. "
+            "대답하지 않아도 괜찮다는 여지를 함께 남깁니다.")
+
+
+def build_accompany(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
+    """4차(수용·동행 모드): 질문을 멈춘다. 연속된 짧은 대답은 말하기 어렵다는 신호로
+    해석하고, 캐묻는 대신 곁에 머무른다. '잘 지내고 있다'고 가정하지 않는다."""
+    return (f"{_base()}\n\n[접근 지침] 내담자가 여러 차례 짧게만 답했습니다. 이는 지금 "
+            "말로 꺼내기 어렵다는 신호일 수 있습니다. 이번 답변에서는 질문을 하지 않습니다. "
+            "대신: ① 말하기 어려울 수 있음을 있는 그대로 인정하고 ② 지금까지 보인 감정을 "
+            "짧게 반영하며 ③ 준비될 때까지 기다리겠다고, 여기 있겠다고 전합니다. "
+            "밝은 화제 전환이나 해결책 제시를 하지 않습니다. 2~4문장, 물음표 없이.")
 
 
 # 전략 이름 → 함수 매핑. 새 전략을 추가하면 여기에 등록하고 구획 1 에서 이름으로 쓴다
@@ -175,14 +247,22 @@ PROMPT_STRATEGIES = {
     "cbt_label_guided": build_cbt_label_guided,
     "supportive": build_supportive,
     "clarify": build_clarify,
+    "clarify_alt": build_clarify_alt,        # 사다리 2차
+    "clarify_light": build_clarify_light,    # 사다리 3차
+    "accompany": build_accompany,            # 사다리 4차 — 질문 중단·수용·동행
 }
 
 
 def build_llm_messages(strategy: str, primary: str, chunks: list[dict],
-                       prior_messages: list[dict], user_text: str) -> list[dict]:
-    """LLM 에 보낼 최종 메시지 목록: [시스템 프롬프트, 이전 대화..., 이번 발화]."""
+                       prior_messages: list[dict], user_text: str,
+                       secondary_labels: list[str] | None = None) -> list[dict]:
+    """LLM 에 보낼 최종 메시지 목록: [시스템 프롬프트, 이전 대화..., 이번 발화].
+
+    secondary_labels: 멀티라벨 분류기가 함께 선택한 부차 왜곡들 (cbt_label_guided
+    전략만 보조 지침으로 사용, 나머지 전략은 무시). flow 가 상한 적용 후 전달.
+    """
     build = PROMPT_STRATEGIES.get(strategy, build_cbt_label_guided)
-    return [{"role": "system", "content": build(primary, chunks)},
+    return [{"role": "system", "content": build(primary, chunks, tuple(secondary_labels or ()))},
             *prior_messages,
             {"role": "user", "content": user_text}]
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,7 +28,10 @@ from ..session import (
     assistant_turn, crisis_turn, input_pending_turn, ocr_failed_turn,
     session_repository, stt_failed_turn, user_turn,
 )
+from . import context_merge
 from . import policy as respond_policy
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LANGUAGE = "ko-KR"
 
@@ -87,12 +91,21 @@ def input_required_event(session_id: str, reason: str, message: str) -> dict:
 
 
 def meta_event(session_id: str, turn_count: int, input_meta: dict, tts: dict | None,
-               cls: dict | None = None) -> dict:
-    """턴 시작 정보: 몇 번째 턴인지 + 인지왜곡 분류 결과(primary/labels)."""
+               cls: dict | None = None, analysis: dict | None = None) -> dict:
+    """턴 시작 정보: 몇 번째 턴인지 + 인지왜곡 분류 결과(primary/labels).
+
+    analysis: 이번 턴 분류가 "어떻게" 나왔는지의 관측 필드 (실험·디버깅용, 추가 계약):
+        context_merged    선행 필터가 병합문을 분류 입력으로 골랐는가
+        merge_trigger     병합을 발동시킨 트리거 ("prev_insufficient" | "short_utterance") 또는 None
+        merge_rejected_by 병합을 포기한 이유 ("novelty" = 화제 전환 감지) 또는 None
+        ladder_step       이번 턴 포함 연속 '불충분' 횟수 (0 = 불충분 아님)
+    """
     payload = {"type": "meta", "session_id": session_id, "turn_count": turn_count,
                "input": input_meta, "tts": tts}
     if cls:
         payload.update({"primary": cls["primary"], "mode": cls["mode"], "labels": cls["labels"]})
+    if analysis is not None:
+        payload["analysis"] = analysis
     return payload
 
 
@@ -429,26 +442,79 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     plan = stage_plan(extracted, tts)
     yield sse(progress_event(session_id, "input", plan))
 
-    # 2) 세 가지 분석을 "동시에" 실행 — gather 는 병렬 실행 후 셋 다 끝나면 결과를 준다.
-    #    순서대로 하면 3번 기다려야 할 것을 1번 기다리는 시간으로 줄이는 것.
+    # 2) [선행 필터] 분류기를 부르기 "전에", 단독 발화를 분류할지 병합문을 분류할지
+    #    미리 결정한다 — 세션은 이미 로드돼 있어(1번) 직전 라벨 확인은 비용 0 이고,
+    #    novelty 게이트는 순수 문자열 규칙이라 모델 없이 돈다. 그 결과 분류기 호출은
+    #    어떤 턴에서도 정확히 1회다 (이전 twopass 는 불충분 턴마다 2회 → CPU 병목).
+    #    트리거: ① 직전 사용자 턴이 '불충분' (clarify 재발화 — 수렴 케이스)
+    #            ② 현재 발화가 단문(≤SHORT_CHARS) — 불충분의 길이 프록시. 파편이 처음
+    #               나온 턴(직전=확신 왜곡)을 ①이 못 잡는 구멍을 메운다
+    #    병합 조건: 트리거 발동 + novelty 게이트 통과("실제 포함된 맥락" 기준 —
+    #    화제 전환이면 병합 포기, 직전 왜곡으로 끌려가는 오염 방지).
+    #    analysis = 이 과정의 관측 기록 (meta 이벤트·세션 저장으로 나감).
+    analysis = {"context_merged": False, "merge_rejected_by": None,
+                "merge_trigger": None, "ladder_step": 0}
+    classify_input = text
+    if settings.CLASSIFY_PREMERGE and settings.CLASSIFY_CONTEXT_MAX_TURNS > 0:
+        turns_hist = session.get("turns") or []
+        window = context_merge.recent_user_texts(turns_hist)
+        if window:
+            trigger = None
+            if context_merge.last_user_label(turns_hist) == "불충분":
+                trigger = "prev_insufficient"
+            elif 0 < settings.CLASSIFY_PREMERGE_SHORT_CHARS >= len(text.strip()):
+                trigger = "short_utterance"
+            if trigger:
+                merged, included = context_merge.merge_candidate(
+                    window, text, settings.CLASSIFY_CONTEXT_MAX_TURNS,
+                    settings.CLASSIFY_CONTEXT_MAX_CHARS)
+                if merged != text:
+                    if context_merge.novelty(text, included):
+                        analysis["merge_rejected_by"] = "novelty"  # 화제 전환 — 단독 분류 유지
+                    else:
+                        classify_input = merged
+                        analysis["context_merged"] = True
+                        analysis["merge_trigger"] = trigger
+
+    # 3) 세 가지 분석을 "동시에" 실행 — gather 는 병렬 실행 후 셋 다 끝나면 결과를 준다.
+    #    safety 와 RAG 는 언제나 "현재 발화만" 본다 (안전 배리어는 매 턴 독립이어야 하고,
+    #    검색은 이번 발화의 주제로 해야 맞다). 분류만 선행 필터가 고른 입력을 쓴다.
     safety, cls, cands = await asyncio.gather(
-        services.safety.check(text),        # 위험(자살/자해) 발화인지
-        services.classifier.classify_one(text),   # 인지왜곡 12분류 중 무엇인지
-        services.retriever.retrieve(text),  # 관련 상담기법 자료 검색(RAG)
+        services.safety.check(text),                       # 위험(자살/자해) 발화인지 — 항상 원문
+        services.classifier.classify_one(classify_input),  # 12분류 — 단독문 또는 병합문, 1회
+        services.retriever.retrieve(text),                 # 상담기법 검색(RAG) — 항상 원문
     )
-    # [progress] "동시 분석" 단계 완료: 세 결과가 모두 도착했다.
+
+    # [progress] "동시 분석" 단계 완료: 분류가 확정됐다 (선행 필터가 고른 입력 기준).
     yield sse(progress_event(session_id, "analyze", plan))
-    primary = cls["primary"]  # 대표 라벨 (예: "흑백 사고")
+    primary = cls["primary"]  # 대표 라벨 (예: "흑백 사고") — 병합문을 분류했다면 그 결과
     # 대표 라벨의 확신 점수를 찾는다 (라벨 목록에서 primary 와 같은 항목의 score)
     confidence = max((l["score"] for l in cls["labels"] if l["label"] == primary), default=0.0)
 
-    # 3) 이번 턴을 어떻게 응답할지 정책 결정 — 규칙은 respond/policy.py [구획 1]에서 편집
-    policy = respond_policy.resolve(safety, cls)
+    # 4) [완화 사다리 단계] 최종 라벨이 '불충분'이면 "몇 번째 연속 불충분인지"를 센다.
+    #    이 숫자로 policy.resolve 가 질문의 각도·무게를 바꾸고, ESCAPE_AFTER(기본 4)째는
+    #    질문을 멈추는 수용·동행 모드로 전환한다 (4연속 ≈ 발화 회피 신호라는 실측 근거).
+    #    INSUFFICIENT_ESCAPE_AFTER=0 은 사다리 전체 끔 (0=꺼짐 관례 — POLICY_MIN_CONFIDENCE 와 동일).
+    if primary == "불충분" and settings.INSUFFICIENT_ESCAPE_AFTER > 0:
+        analysis["ladder_step"] = context_merge.trailing_insufficient(session.get("turns") or []) + 1
+
+    # 5) 이번 턴을 어떻게 응답할지 정책 결정 — 규칙은 respond/policy.py [구획 1]에서 편집
+    policy = respond_policy.resolve(safety, cls, ladder_step=analysis["ladder_step"])
 
     # 사용자 발화를 대화 기록에 저장하고, 분류 결과를 meta 이벤트로 프론트에 먼저 알린다
-    await session_repository.append_turn(session_id, user_turn(text, primary, safety, input_meta, tts))
+    # (저장하는 primary 는 병합 분류까지 끝난 "최종" 라벨 — 다음 턴의 선행 필터·사다리가
+    #  이 값을 본다. analysis 를 사용자 턴에도 남겨야 "병합으로 얻은 라벨"을 원발화 라벨과
+    #  구분해 집계·재학습 추출에서 걸러낼 수 있다 — 위기·빈 답변 턴도 기록이 남도록 여기서 저장)
+    # 멀티라벨 선택 결과 전체를 세션에 남긴다 — 학습 데이터가 최대 4개 동시 라벨까지
+    # 포함하므로 primary 만 저장하면 동시 왜곡 정보가 유실된다 (재현 지적, 2026-07-04)
+    selected_labels = [{"label": l["label"], "score": round(float(l.get("score", 0.0)), 4)}
+                       for l in sorted(cls["labels"], key=lambda l: -float(l.get("score", 0.0)))
+                       if l.get("selected")]
+    await session_repository.append_turn(
+        session_id, user_turn(text, primary, safety, input_meta, tts,
+                              analysis=analysis, selected_labels=selected_labels))
     snap = await session_repository.snapshot(session_id)
-    yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls))
+    yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls, analysis))
 
     # 4) 위기 분기: LLM 답변 생성 없이 고정 메시지 + 상담 핫라인을 즉시 출력하고 종료
     #    지역(시도)이 정해지고 지역 연락처 DB 가 켜져 있으면 지역 창구를 전국 공통 앞에 붙인다.
@@ -479,9 +545,21 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     chunks = select_chunks(cands, top_n=policy.rag_top_n) if policy.use_rag else []
     yield sse(chunks_event(session_id, chunks))
 
+    # [멀티라벨 보조 지침] 분류기가 primary 와 "함께 선택한"(selected=True) 부차 왜곡들.
+    # threshold(0.55) 이상 왜곡이 여러 개면 주 지침 하나만으로는 관찰된 패턴을 다 못
+    # 담으므로, score 순으로 상한(LABEL_GUIDANCE_MAX-1)까지 보조 지침으로 병기한다.
+    # 정상/불충분은 selection_policy 가 배타 처리하므로 여기 걸릴 일이 없지만 한 번 더 거른다.
+    secondary_labels: list[str] = []
+    if policy.prompt_strategy == "cbt_label_guided" and settings.LABEL_GUIDANCE_MAX > 1:
+        secondary_labels = [l["label"] for l in
+                            sorted(cls["labels"], key=lambda l: -float(l.get("score", 0.0)))
+                            if l.get("selected") and l["label"] not in ("정상", "불충분", primary)
+                            ][: settings.LABEL_GUIDANCE_MAX - 1]
+
     # 시스템 프롬프트(상담 스타일·라벨 지침) + 이전 대화 + 이번 발화 → LLM 입력 메시지
     messages = respond_policy.build_llm_messages(policy.prompt_strategy, primary, chunks,
-                                                 prior_messages, text)
+                                                 prior_messages, text,
+                                                 secondary_labels=secondary_labels)
     # [progress] "응답 방침 결정" 단계 완료: 정책 라우팅 + 프롬프트 구성까지 끝났다.
     # 다음 이벤트부터 LLM 답변 조각(token)이 흘러온다 — 프론트는 여기서 로딩 표시를
     # "답변 작성 중"으로 바꾸면 자연스럽다.
@@ -499,7 +577,12 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     # (confidence 를 남겨야 운영 후 "저확신 강등이 몇 번 일어났나"를 DB 에서 집계할 수 있다)
     assistant_text = "".join(assistant_parts).strip()
     if assistant_text:
-        policy_meta = {**policy.as_metadata(), "confidence": round(confidence, 4)}
+        # analysis(병합·사다리 관측 필드)도 함께 저장 — 운영 후 "병합이 몇 번 발동했고
+        # 사다리가 어디까지 갔나"를 세션 DB 에서 집계하기 위해서다.
+        # secondary_labels 는 보조 지침이 실제로 주입된 턴에만 남긴다 (있을 때만 기록).
+        policy_meta = {**policy.as_metadata(), "confidence": round(confidence, 4), **analysis}
+        if secondary_labels:
+            policy_meta["secondary_labels"] = secondary_labels
         await session_repository.append_turn(
             session_id, assistant_turn(assistant_text, primary, chunks, policy=policy_meta))
 

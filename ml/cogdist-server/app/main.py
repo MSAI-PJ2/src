@@ -43,6 +43,11 @@ def readyz(response: Response) -> dict:
 def predict(req: PredictRequest) -> dict:
     if not ready or classifier is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"status": "loading"})
+    # 배치 경로(model.batch_predict)와 동일한 계약: 빈 문자열에 허구 분류를 만들지 않는다
+    # (CLS/SEP 만으로도 sigmoid 는 12개 점수를 뱉는다 — 2026-07-04 검수에서 확인된 모순 수정)
+    if not isinstance(req.text, str) or not req.text.strip():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="text must be a non-empty string")
     return classifier.predict(req.text, req.threshold)
 
 

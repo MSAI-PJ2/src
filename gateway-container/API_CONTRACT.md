@@ -219,7 +219,10 @@ POST /v1/batch-classify
 }
 ```
 
-`results[]`의 각 원소는 `/v1/classify`의 단일 응답과 같은 구조를 따른다.
+원소는 평면 구조가 아니라 **래퍼**다 — `result` 안쪽이 `/v1/classify`의 단일 응답과 같은
+구조이고, 실제 형태는 `{"index": 0, "ok": true, "error": null, "result": {...}}` 이다.
+**소비자는 반드시 `ok` 를 검사**해야 한다: ok=false 항목(빈 문자열 등)은 result=null 에
+error 문자열만 있다 — 이를 라벨 결과로 읽으면 배치 추출이 조용히 오염된다.
 
 ## 7. Respond 공통 계약
 
@@ -344,8 +347,37 @@ progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
   "mode": "multi_label",
   "labels": [],
   "input": {"input_type":"text"},
-  "tts": null
+  "tts": null,
+  "analysis": {"context_merged": false, "merge_trigger": null, "merge_rejected_by": null, "ladder_step": 1}
 }
+```
+
+`meta` 의 분류 필드 (멀티라벨 주의):
+
+```text
+primary/mode/labels: /v1/classify(§5)와 같은 구조. labels 는 예시처럼 빈 배열이 아니라
+  **12개 전체** [{label, score, selected}] 가 온다 — 동시 왜곡 뱃지(최대 4개)는
+  labels[].selected 가 소스다. primary 하나만 렌더링하면 함께 관찰된 왜곡이 유실된다.
+threshold 는 meta 에 없다 — selected 판정 기준이 필요하면 §5 참조. 원문 재분류 금지:
+  병합 분류 턴에서는 /v1/classify(원문) 결과와 meta(병합문 결과)가 다를 수 있다.
+빈 입력 경로(§7 실패 경로)의 meta 에는 primary/mode/labels/analysis 가 **아예 없다** —
+  meta 파서는 필드 존재를 확인하고 접근할 것.
+```
+
+`analysis` (추가 계약, 하위 호환 — 없는 것으로 취급해도 무방):
+
+```text
+context_merged     true 면 primary/labels 가 "병합문 분류" 결과 — 선행 필터가 분류 전에
+                   직전 라벨·발화 길이로 병합을 결정 (분류기 호출은 턴당 항상 1회)
+merge_trigger      병합을 발동시킨 트리거: "prev_insufficient"(직전 턴 불충분) |
+                   "short_utterance"(단문 파편) | null(병합 안 함)
+merge_rejected_by  "novelty" = 화제 전환(새 내용어) 감지로 병합을 포기하고 단독 분류 유지
+ladder_step        이번 턴 포함 연속 '불충분' 횟수 (0 = 불충분 아님).
+                   2·3 = 완화된 명확화 질문, INSUFFICIENT_ESCAPE_AFTER(기본 4)부터
+                   질문을 멈추는 수용·동행 모드 (assistant policy = insufficient_accompany)
+관련 env           CLASSIFY_PREMERGE(병합 끔/켬) / CLASSIFY_PREMERGE_SHORT_CHARS(20, 0=① 만)
+                   / CLASSIFY_CONTEXT_MAX_TURNS(3, 0=병합 끔) / CLASSIFY_CONTEXT_MAX_CHARS(180)
+                   / INSUFFICIENT_ESCAPE_AFTER(4, 0=사다리 끔 — 병합과 스위치 분리)
 ```
 
 ## 10. Respond - transcript 입력
@@ -592,6 +624,8 @@ Partition key: /session_id
       "safety_reason": null,
       "input": {"input_type":"text"},
       "tts": null,
+      "analysis": {"context_merged": false, "merge_trigger": null, "merge_rejected_by": null, "ladder_step": 1},
+      "selected_labels": [{"label": "불충분", "score": 0.5244}],
       "ts": "2026-07-01T00:00:01+00:00"
     },
     {
@@ -600,11 +634,30 @@ Partition key: /session_id
       "event": "respond",
       "primary": "불충분",
       "rag_chunk_ids": ["asist-snuh-2025-021"],
+      "policy": {"name": "insufficient_clarify", "prompt_strategy": "clarify", "use_rag": false,
+                 "confidence": 0.9123,
+                 "context_merged": false, "merge_rejected_by": null, "ladder_step": 1},
       "ts": "2026-07-01T00:00:10+00:00"
     }
   ]
 }
 ```
+
+⚠ 사용자 턴 `primary` 해석 주의 (2026-07 컨텍스트 병합 도입 후): `analysis.context_merged`
+가 `true` 인 턴의 `primary` 는 **직전 발화들과 병합해 재분류한 최종 라벨**이다 — 발화
+단독 라벨이 필요한 소비자(재학습 데이터 추출, 라벨 분포 분석)는 이 필드로 걸러낼 것.
+`analysis` 는 SSE meta 이벤트(§9)와 동일한 관측 필드로, user 턴과 assistant 턴의
+`policy` 양쪽에 저장된다 (위기·빈 답변 턴에서도 user 턴 쪽 기록은 남는다).
+
+user 턴 `selected_labels` (2026-07 멀티라벨 전체 기록): 분류기가 선택한(selected=true)
+라벨 전체를 [{label, score}] 로 score 내림차순 저장 — 학습 데이터가 최대 4개 동시 라벨을
+포함하므로 primary 하나만으로는 분류 결과가 유실된다. 왜곡 히스토리·집계·재학습 추출은
+`primary` 가 아니라 이 필드를 기준으로 한다 (primary = 라우팅 대표값).
+
+assistant 턴 `policy.secondary_labels` (선택 필드, 2026-07 멀티라벨 보조 지침): 분류기가
+primary 와 **함께 선택한**(selected=true, threshold 이상) 부차 왜곡 중 프롬프트에 보조
+지침으로 실제 주입된 라벨 목록 — 주입이 없던 턴에는 필드 자체가 없다.
+관련 env: `LABEL_GUIDANCE_MAX`(기본 2 = 주 지침 + 보조 1, 1 = 보조 끔).
 
 `GET /v1/sessions/{session_id}` 응답 예시:
 

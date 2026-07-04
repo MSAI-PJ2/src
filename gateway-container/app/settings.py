@@ -39,7 +39,13 @@ ALLOWED_ORIGINS = [
 CONTENT_SAFETY_ENABLED = _bool("CONTENT_SAFETY_ENABLED", False)
 CONTENT_SAFETY_ENDPOINT = os.getenv("CONTENT_SAFETY_ENDPOINT", "")
 CONTENT_SAFETY_KEY = os.getenv("CONTENT_SAFETY_KEY", "")
-# 위험 점수(severity)가 이 값 이상이면 차단. Azure 기준 0/2/4/6 단계
+# 위험 점수(severity)가 이 값 이상이면 차단. Azure 기준 0/2/4/6 단계 (0=안전, 2=mild, 4=medium, 6=high)
+#   ⚠ 4 상향은 실측으로 기각됨 (2026-07-04, gateway_safety_sweep 실험): Azure 는
+#   의도·계획 없는 자살사고 표현("죽고 싶다는 생각이 며칠째…")을 severity 2 로 매기므로,
+#   4 로 올리면 자살사고가 차단 없이 일반 상담으로 흘러간다. 2 유지가 안전 하한선.
+#   threshold 2 의 과차단(강한 자기비하 오차단) 문제는 임계값이 아니라 소프트 모드
+#   (severity 2~3 = 상담 진행 + 핫라인 병기) 설계로 풀어야 한다 — 팀 논의 보류 중.
+#   실측 도구: scripts/safety_threshold_probe.py
 CONTENT_SAFETY_THRESHOLD = int(os.getenv("CONTENT_SAFETY_THRESHOLD", "2"))
 CONTENT_SAFETY_TIMEOUT = float(os.getenv("CONTENT_SAFETY_TIMEOUT", "5"))
 
@@ -48,10 +54,45 @@ CONTENT_SAFETY_TIMEOUT = float(os.getenv("CONTENT_SAFETY_TIMEOUT", "5"))
 # (라벨 가산점 rerank 는 2026-07 제거 — respond/flow.py [구획 3] 주석 참고)
 RAG_TOP_N = int(os.getenv("RAG_TOP_N", os.getenv("RERANK_TOP_N", "4")))
 
-# --- 컨텍스트 정책: 저확신 강등 하한 ---
+# --- 컨텍스트 정책: 저확신 강등 하한 (추가분) ---
 # 왜곡 라벨인데 확신이 이 값 미만이면 CBT 프롬프트 대신 명확화(clarify)로 강등.
-# 0 = 꺼짐(현행). sigmoid multi_label 모델은 점수가 낮게 깔리므로 값 설정 시 주의.
+# 이 노브와 별개로, 분류기 응답의 threshold(배포 0.55)는 항상 왜곡 단정의 기본
+# 하한으로 적용된다(policy.resolve — 멀티라벨 argmax 는 threshold 검사를 안 받으므로).
+# 참고: 배포 multi_large_v2 실측 확신값은 0.8~0.99 대(낮게 깔리지 않음) — 이 값을
+# 0.6~0.7 로 올리는 실험도 안전한 편. 0 = 추가 하한 없음(기본 threshold 만 적용).
 POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
+
+# --- 컨텍스트 병합: 선행 필터 (분류 "전에" 병합/단독을 결정 — 턴당 분류기 호출 항상 1회) ---
+# 설계 변경(2026-07-04, 재현 지시): 이전 twopass(단독 분류 후 불충분이면 재분류)는 불충분
+# 턴마다 분류기를 2회 호출해 CPU 서빙 병목(4vCPU 요구)이 됐다. 지금은 이미 로드된 세션에서
+# 직전 라벨을 확인하는 "선행 필터"가 분류 입력(단독문/병합문)을 미리 고른다 — 추가 지연 0.
+# 트리거(둘 중 하나, 단 novelty 게이트 통과 시에만 병합):
+#   ① 직전 사용자 턴 라벨 = 불충분  (clarify 에 대한 재발화 — 수렴 케이스)
+#   ② 현재 발화가 단문(SHORT_CHARS 이하) — 불충분의 길이 프록시. 파편이 "처음" 나온
+#      턴(직전=확신 왜곡)을 ①이 못 잡는 구멍을 메운다 (실측: 회복된 파편 전원 16자 이하)
+# ※ twopass 기준 실측(회복 0.04→0.56 · 오염/날조/오탐 0.00)은 참고치 — 선행 필터판의
+#   성능 재검증은 로컬 API 테스트로 수행 예정.
+CLASSIFY_PREMERGE = _bool("CLASSIFY_PREMERGE", True)          # false = 병합 자체를 끔
+# 트리거 ② 의 단문 기준(자). 0 = ② 끔 (직전 라벨 필터만 사용)
+CLASSIFY_PREMERGE_SHORT_CHARS = int(os.getenv("CLASSIFY_PREMERGE_SHORT_CHARS", "20"))
+# 병합에 끌어올 직전 사용자 발화 수 — 3이 2보다 회복률 우위 (twopass 기준 0.56 vs 0.40). 0 = 병합 끔
+CLASSIFY_CONTEXT_MAX_TURNS = int(os.getenv("CLASSIFY_CONTEXT_MAX_TURNS", "3"))
+# 병합문 길이 상한(자) — 분류기 절단선(160토큰 ≈ 300자)의 안전 마진
+CLASSIFY_CONTEXT_MAX_CHARS = int(os.getenv("CLASSIFY_CONTEXT_MAX_CHARS", "180"))
+
+# --- 연속 '불충분' 완화 사다리 (respond/policy.py 구획 1·2) ---
+# 병합 재분류를 거치고도 '불충분'이 이 횟수째 연속되면 질문을 멈추고 수용·동행
+# 모드로 전환한다 (발화 회피 신호로 해석). 배포 가중치 실측: 문턱 4에서 회피형
+# 12/12(100%) 도달 vs 비회피 0/108(0%) — 완전 분리. 문턱 2였다면 비회피의
+# 10%(병합 켬)~45%(병합 끔)가 수용 모드로 오탈출했을 값.
+# 0 = 사다리 전체 끔 (0=꺼짐 관례, POLICY_MIN_CONFIDENCE 와 동일). 최소 유효값은 2 권장.
+INSUFFICIENT_ESCAPE_AFTER = int(os.getenv("INSUFFICIENT_ESCAPE_AFTER", "4"))
+
+# --- 멀티라벨 보조 지침: 프롬프트에 넣을 왜곡 접근 지침의 최대 개수 (주 지침 포함) ---
+# 멀티라벨 분류기는 왜곡을 여러 개 동시 선택할 수 있다(threshold 0.55 이상 전부).
+# 기본 2 = 주 지침 + 보조 지침 1개. 지침을 3개 이상 쌓으면 서로 희석되어 답변이
+# 산만해지므로 늘릴 때 주의. 1 = 보조 지침 끔 (primary 단독, 도입 이전 동작).
+LABEL_GUIDANCE_MAX = int(os.getenv("LABEL_GUIDANCE_MAX", "2"))
 
 # --- 위기 지역 연락처 DB (respond/policy.py 구획 3) ---
 # HOTLINE_CONTAINER 를 채우면 켜짐 — 세션과 같은 Cosmos 계정(COSMOS_*)을 쓴다.
