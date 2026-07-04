@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,7 +28,10 @@ from ..session import (
     assistant_turn, crisis_turn, input_pending_turn, ocr_failed_turn,
     session_repository, stt_failed_turn, user_turn,
 )
+from . import context_merge
 from . import policy as respond_policy
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_LANGUAGE = "ko-KR"
 
@@ -87,12 +91,20 @@ def input_required_event(session_id: str, reason: str, message: str) -> dict:
 
 
 def meta_event(session_id: str, turn_count: int, input_meta: dict, tts: dict | None,
-               cls: dict | None = None) -> dict:
-    """턴 시작 정보: 몇 번째 턴인지 + 인지왜곡 분류 결과(primary/labels)."""
+               cls: dict | None = None, analysis: dict | None = None) -> dict:
+    """턴 시작 정보: 몇 번째 턴인지 + 인지왜곡 분류 결과(primary/labels).
+
+    analysis: 이번 턴 분류가 "어떻게" 나왔는지의 관측 필드 (실험·디버깅용, 추가 계약):
+        context_merged    직전 발화와 병합해 재분류한 결과인가
+        merge_rejected_by 병합을 포기한 이유 ("novelty" = 화제 전환 감지) 또는 None
+        ladder_step       이번 턴 포함 연속 '불충분' 횟수 (0 = 불충분 아님)
+    """
     payload = {"type": "meta", "session_id": session_id, "turn_count": turn_count,
                "input": input_meta, "tts": tts}
     if cls:
         payload.update({"primary": cls["primary"], "mode": cls["mode"], "labels": cls["labels"]})
+    if analysis is not None:
+        payload["analysis"] = analysis
     return payload
 
 
@@ -431,24 +443,63 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
 
     # 2) 세 가지 분석을 "동시에" 실행 — gather 는 병렬 실행 후 셋 다 끝나면 결과를 준다.
     #    순서대로 하면 3번 기다려야 할 것을 1번 기다리는 시간으로 줄이는 것.
+    #    safety 와 RAG 는 언제나 "현재 발화만" 본다 — 아래 병합 재분류와 무관 (안전
+    #    배리어는 매 턴 독립이어야 하고, 검색은 이번 발화의 주제로 해야 맞다).
     safety, cls, cands = await asyncio.gather(
         services.safety.check(text),        # 위험(자살/자해) 발화인지
         services.classifier.classify_one(text),   # 인지왜곡 12분류 중 무엇인지
         services.retriever.retrieve(text),  # 관련 상담기법 자료 검색(RAG)
     )
-    # [progress] "동시 분석" 단계 완료: 세 결과가 모두 도착했다.
+
+    # 2.5) [컨텍스트 병합 재분류 — twopass] 단독 분류가 '불충분'이면, 직전 발화들과
+    #      합쳐 딱 1회 다시 분류한다. "네 그냥 그래요" 같은 이어말하기가 직전 맥락의
+    #      왜곡 라벨을 되찾게 하는 장치 (실측 회복 0.84 — respond/context_merge.py 참조).
+    #      단, novelty 게이트가 화제 전환("점심에 김치찌개…")을 감지하면 병합을 포기하고
+    #      '불충분'(명확화 질문)을 유지한다 — 직전 왜곡으로 끌려가는 오염 방지 (실측 0.00).
+    #      analysis = 이 과정의 관측 기록 (meta 이벤트·세션 policy 메타로 나감).
+    analysis = {"context_merged": False, "merge_rejected_by": None, "ladder_step": 0}
+    if (settings.CLASSIFY_RETRY_ON_INSUFFICIENT and settings.CLASSIFY_CONTEXT_MAX_TURNS > 0
+            and cls["primary"] == "불충분" and safety.get("safe", True)):
+        window = context_merge.recent_user_texts(session.get("turns") or [])
+        # 병합문을 먼저 구성하고, novelty 게이트는 "실제로 포함된 맥락" 기준으로 판정한다
+        # (길이 초과로 오래된 맥락이 잘려 나가면 게이트 기준도 같이 줄어야 일관적이다).
+        merged, included = context_merge.merge_candidate(
+            window, text, settings.CLASSIFY_CONTEXT_MAX_TURNS, settings.CLASSIFY_CONTEXT_MAX_CHARS)
+        if merged != text:
+            if context_merge.novelty(text, included):
+                analysis["merge_rejected_by"] = "novelty"   # 화제 전환 — 병합하면 안 되는 턴
+            else:
+                try:
+                    cls = await services.classifier.classify_one(merged)
+                    analysis["context_merged"] = True
+                except Exception:
+                    # 재분류는 "덤"이다 — 실패하면 단독 결과로 그냥 진행 (턴을 죽이지 않는다)
+                    logger.warning("병합 재분류 실패 — 단독 분류 결과로 진행", exc_info=True)
+
+    # [progress] "동시 분석" 단계 완료: 분류(병합 재분류 포함)가 확정됐다.
     yield sse(progress_event(session_id, "analyze", plan))
-    primary = cls["primary"]  # 대표 라벨 (예: "흑백 사고")
+    primary = cls["primary"]  # 대표 라벨 (예: "흑백 사고") — 병합 재분류가 있었다면 그 결과
     # 대표 라벨의 확신 점수를 찾는다 (라벨 목록에서 primary 와 같은 항목의 score)
     confidence = max((l["score"] for l in cls["labels"] if l["label"] == primary), default=0.0)
 
+    # 2.7) [완화 사다리 단계] 최종 라벨이 '불충분'이면 "몇 번째 연속 불충분인지"를 센다.
+    #      이 숫자로 policy.resolve 가 질문의 각도·무게를 바꾸고, ESCAPE_AFTER(기본 4)째는
+    #      질문을 멈추는 수용·동행 모드로 전환한다 (4연속 ≈ 발화 회피 신호라는 실측 근거).
+    #      INSUFFICIENT_ESCAPE_AFTER=0 은 사다리 전체 끔 (0=꺼짐 관례 — POLICY_MIN_CONFIDENCE 와 동일).
+    if primary == "불충분" and settings.INSUFFICIENT_ESCAPE_AFTER > 0:
+        analysis["ladder_step"] = context_merge.trailing_insufficient(session.get("turns") or []) + 1
+
     # 3) 이번 턴을 어떻게 응답할지 정책 결정 — 규칙은 respond/policy.py [구획 1]에서 편집
-    policy = respond_policy.resolve(safety, cls)
+    policy = respond_policy.resolve(safety, cls, ladder_step=analysis["ladder_step"])
 
     # 사용자 발화를 대화 기록에 저장하고, 분류 결과를 meta 이벤트로 프론트에 먼저 알린다
-    await session_repository.append_turn(session_id, user_turn(text, primary, safety, input_meta, tts))
+    # (저장하는 primary 는 병합 재분류까지 끝난 "최종" 라벨 — 다음 턴의 사다리 계산이 이 값을
+    #  본다. analysis 를 사용자 턴에도 남겨야 "병합으로 얻은 라벨"을 원발화 라벨과 구분해
+    #  집계·재학습 추출에서 걸러낼 수 있다 — 위기 턴/빈 답변 턴도 기록이 남도록 여기서 저장)
+    await session_repository.append_turn(
+        session_id, user_turn(text, primary, safety, input_meta, tts, analysis=analysis))
     snap = await session_repository.snapshot(session_id)
-    yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls))
+    yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls, analysis))
 
     # 4) 위기 분기: LLM 답변 생성 없이 고정 메시지 + 상담 핫라인을 즉시 출력하고 종료
     #    지역(시도)이 정해지고 지역 연락처 DB 가 켜져 있으면 지역 창구를 전국 공통 앞에 붙인다.
@@ -499,7 +550,9 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     # (confidence 를 남겨야 운영 후 "저확신 강등이 몇 번 일어났나"를 DB 에서 집계할 수 있다)
     assistant_text = "".join(assistant_parts).strip()
     if assistant_text:
-        policy_meta = {**policy.as_metadata(), "confidence": round(confidence, 4)}
+        # analysis(병합·사다리 관측 필드)도 함께 저장 — 운영 후 "병합이 몇 번 발동했고
+        # 사다리가 어디까지 갔나"를 세션 DB 에서 집계하기 위해서다
+        policy_meta = {**policy.as_metadata(), "confidence": round(confidence, 4), **analysis}
         await session_repository.append_turn(
             session_id, assistant_turn(assistant_text, primary, chunks, policy=policy_meta))
 

@@ -323,11 +323,21 @@ def input_pending_turn(input_meta: dict, tts: dict | None) -> dict:
     return {"role": "user", "text": "", "event": "input_pending", "input": input_meta, "tts": tts}
 
 
-def user_turn(text: str, primary: str, safety: dict, input_meta: dict, tts: dict | None) -> dict:
-    """사용자 발화 기록 — 분류 라벨과 안전검사 결과를 함께 저장한다."""
-    return {"role": "user", "text": text, "primary": primary,
+def user_turn(text: str, primary: str, safety: dict, input_meta: dict, tts: dict | None,
+              analysis: dict | None = None) -> dict:
+    """사용자 발화 기록 — 분류 라벨과 안전검사 결과를 함께 저장한다.
+
+    analysis: 분류가 어떻게 나왔는지의 관측 기록 (respond/flow.py 2.5·2.7 참조).
+        context_merged=True 인 턴의 primary 는 "직전 맥락과 병합해 얻은" 라벨이므로,
+        발화 단독 라벨이 필요한 소비자(재학습 데이터 추출, 라벨 분포 분석)는 이 필드로
+        걸러야 한다 — API_CONTRACT.md §14 저장 문서 계약 참조.
+    """
+    turn = {"role": "user", "text": text, "primary": primary,
             "safety": "safe" if safety.get("safe") else "blocked",
             "safety_reason": safety.get("reason"), "input": input_meta, "tts": tts}
+    if analysis is not None:
+        turn["analysis"] = analysis
+    return turn
 
 
 def crisis_turn(payload: dict) -> dict:

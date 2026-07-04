@@ -344,8 +344,23 @@ progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
   "mode": "multi_label",
   "labels": [],
   "input": {"input_type":"text"},
-  "tts": null
+  "tts": null,
+  "analysis": {"context_merged": false, "merge_rejected_by": null, "ladder_step": 1}
 }
+```
+
+`analysis` (추가 계약, 하위 호환 — 없는 것으로 취급해도 무방):
+
+```text
+context_merged     true 면 primary/labels 가 "직전 발화 병합 재분류" 결과
+                   ('불충분' 단독 판정을 직전 맥락과 합쳐 1회 재분류하는 기능)
+merge_rejected_by  "novelty" = 화제 전환(새 내용어) 감지로 병합을 포기하고 단독 결과 유지
+ladder_step        이번 턴 포함 연속 '불충분' 횟수 (0 = 불충분 아님).
+                   2·3 = 완화된 명확화 질문, INSUFFICIENT_ESCAPE_AFTER(기본 4)부터
+                   질문을 멈추는 수용·동행 모드 (assistant policy = insufficient_accompany)
+관련 env           CLASSIFY_RETRY_ON_INSUFFICIENT(병합 재분류만 끔/켬)
+                   / CLASSIFY_CONTEXT_MAX_TURNS(3, 0=병합 끔) / CLASSIFY_CONTEXT_MAX_CHARS(180)
+                   / INSUFFICIENT_ESCAPE_AFTER(4, 0=사다리 끔 — 두 기능 스위치는 분리)
 ```
 
 ## 10. Respond - transcript 입력
@@ -592,6 +607,7 @@ Partition key: /session_id
       "safety_reason": null,
       "input": {"input_type":"text"},
       "tts": null,
+      "analysis": {"context_merged": false, "merge_rejected_by": null, "ladder_step": 1},
       "ts": "2026-07-01T00:00:01+00:00"
     },
     {
@@ -600,11 +616,20 @@ Partition key: /session_id
       "event": "respond",
       "primary": "불충분",
       "rag_chunk_ids": ["asist-snuh-2025-021"],
+      "policy": {"name": "insufficient_clarify", "prompt_strategy": "clarify", "use_rag": false,
+                 "confidence": 0.9123,
+                 "context_merged": false, "merge_rejected_by": null, "ladder_step": 1},
       "ts": "2026-07-01T00:00:10+00:00"
     }
   ]
 }
 ```
+
+⚠ 사용자 턴 `primary` 해석 주의 (2026-07 컨텍스트 병합 도입 후): `analysis.context_merged`
+가 `true` 인 턴의 `primary` 는 **직전 발화들과 병합해 재분류한 최종 라벨**이다 — 발화
+단독 라벨이 필요한 소비자(재학습 데이터 추출, 라벨 분포 분석)는 이 필드로 걸러낼 것.
+`analysis` 는 SSE meta 이벤트(§9)와 동일한 관측 필드로, user 턴과 assistant 턴의
+`policy` 양쪽에 저장된다 (위기·빈 답변 턴에서도 user 턴 쪽 기록은 남는다).
 
 `GET /v1/sessions/{session_id}` 응답 예시:
 

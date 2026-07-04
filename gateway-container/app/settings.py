@@ -59,6 +59,23 @@ RAG_TOP_N = int(os.getenv("RAG_TOP_N", os.getenv("RERANK_TOP_N", "4")))
 # 0 = 꺼짐(현행). sigmoid multi_label 모델은 점수가 낮게 깔리므로 값 설정 시 주의.
 POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
 
+# --- 컨텍스트 병합 재분류 (twopass) — 노브 근거: gateway_policy_lab_2026-07-04 실측 ---
+# 단독 분류가 '불충분'일 때 직전 발화들과 합쳐 1회 재분류한다 (respond/context_merge.py).
+# 실측: 파편 턴 회복 0.84 · 화제전환 오염 0.00 (novelty 게이트 포함) · 분류기 호출 1.36/턴.
+# ※ 이 플래그는 "병합 재분류"만 끈다 — 아래 완화 사다리는 별도 노브(ESCAPE_AFTER=0)로 끈다.
+CLASSIFY_RETRY_ON_INSUFFICIENT = _bool("CLASSIFY_RETRY_ON_INSUFFICIENT", True)
+# 병합에 끌어올 직전 사용자 발화 수 — 3이 2보다 회복률 우위 (0.84 vs 0.69). 0 = 병합 끔
+CLASSIFY_CONTEXT_MAX_TURNS = int(os.getenv("CLASSIFY_CONTEXT_MAX_TURNS", "3"))
+# 병합문 길이 상한(자) — 분류기 절단선(160토큰 ≈ 300자)의 안전 마진. 240과 성능 동률
+CLASSIFY_CONTEXT_MAX_CHARS = int(os.getenv("CLASSIFY_CONTEXT_MAX_CHARS", "180"))
+
+# --- 연속 '불충분' 완화 사다리 (respond/policy.py 구획 1·2) ---
+# 병합 재분류를 거치고도 '불충분'이 이 횟수째 연속되면 질문을 멈추고 수용·동행
+# 모드로 전환한다 (발화 회피 신호로 해석). 실측: 문턱 4에서 회피형(100% 도달)과
+# 비회피(0.9% 도달)가 거의 완전 분리 — 2였다면 비회피의 21%가 오탈출.
+# 0 = 사다리 전체 끔 (0=꺼짐 관례, POLICY_MIN_CONFIDENCE 와 동일). 최소 유효값은 2 권장.
+INSUFFICIENT_ESCAPE_AFTER = int(os.getenv("INSUFFICIENT_ESCAPE_AFTER", "4"))
+
 # --- 위기 지역 연락처 DB (respond/policy.py 구획 3) ---
 # HOTLINE_CONTAINER 를 채우면 켜짐 — 세션과 같은 Cosmos 계정(COSMOS_*)을 쓴다.
 # 실제 배포 DB 예: 컨테이너 kfsp_centers (파티션키 /시도, 필드 기관명·전화·주소·시도·시군구).
