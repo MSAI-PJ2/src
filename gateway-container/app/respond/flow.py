@@ -530,9 +530,21 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     chunks = select_chunks(cands, top_n=policy.rag_top_n) if policy.use_rag else []
     yield sse(chunks_event(session_id, chunks))
 
+    # [멀티라벨 보조 지침] 분류기가 primary 와 "함께 선택한"(selected=True) 부차 왜곡들.
+    # threshold(0.55) 이상 왜곡이 여러 개면 주 지침 하나만으로는 관찰된 패턴을 다 못
+    # 담으므로, score 순으로 상한(LABEL_GUIDANCE_MAX-1)까지 보조 지침으로 병기한다.
+    # 정상/불충분은 selection_policy 가 배타 처리하므로 여기 걸릴 일이 없지만 한 번 더 거른다.
+    secondary_labels: list[str] = []
+    if policy.prompt_strategy == "cbt_label_guided" and settings.LABEL_GUIDANCE_MAX > 1:
+        secondary_labels = [l["label"] for l in
+                            sorted(cls["labels"], key=lambda l: -float(l.get("score", 0.0)))
+                            if l.get("selected") and l["label"] not in ("정상", "불충분", primary)
+                            ][: settings.LABEL_GUIDANCE_MAX - 1]
+
     # 시스템 프롬프트(상담 스타일·라벨 지침) + 이전 대화 + 이번 발화 → LLM 입력 메시지
     messages = respond_policy.build_llm_messages(policy.prompt_strategy, primary, chunks,
-                                                 prior_messages, text)
+                                                 prior_messages, text,
+                                                 secondary_labels=secondary_labels)
     # [progress] "응답 방침 결정" 단계 완료: 정책 라우팅 + 프롬프트 구성까지 끝났다.
     # 다음 이벤트부터 LLM 답변 조각(token)이 흘러온다 — 프론트는 여기서 로딩 표시를
     # "답변 작성 중"으로 바꾸면 자연스럽다.
@@ -551,8 +563,11 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     assistant_text = "".join(assistant_parts).strip()
     if assistant_text:
         # analysis(병합·사다리 관측 필드)도 함께 저장 — 운영 후 "병합이 몇 번 발동했고
-        # 사다리가 어디까지 갔나"를 세션 DB 에서 집계하기 위해서다
+        # 사다리가 어디까지 갔나"를 세션 DB 에서 집계하기 위해서다.
+        # secondary_labels 는 보조 지침이 실제로 주입된 턴에만 남긴다 (있을 때만 기록).
         policy_meta = {**policy.as_metadata(), "confidence": round(confidence, 4), **analysis}
+        if secondary_labels:
+            policy_meta["secondary_labels"] = secondary_labels
         await session_repository.append_turn(
             session_id, assistant_turn(assistant_text, primary, chunks, policy=policy_meta))
 

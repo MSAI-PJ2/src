@@ -172,18 +172,31 @@ def _rag(chunks: list[dict]) -> str:
     return f"\n\n{RAG_HEADER}\n" + "\n".join(f"- {c['content']}" for c in chunks)
 
 
-def build_cbt_label_guided(primary: str, chunks: list[dict]) -> str:
-    """기본 전략: 분류 라벨의 접근 지침 + 참고자료를 포함한 CBT 상담 프롬프트."""
+def build_cbt_label_guided(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
+    """기본 전략: 분류 라벨의 접근 지침 + 참고자료를 포함한 CBT 상담 프롬프트.
+
+    secondary: 멀티라벨 분류기가 primary 와 "함께 선택한" 부차 왜곡 라벨들
+    (flow 가 score 내림차순·상한 적용까지 끝내서 넘겨준다). 주 지침이 상담의
+    중심을 잡고, 보조 지침은 함께 관찰된 패턴을 참고로만 덧붙인다 — 인접
+    왜곡(예: 확대와 축소 ↔ 긍정 축소화)이 흔들려도 상담 방향이 안정되는 효과.
+    """
     guidance = LABEL_GUIDANCE.get(primary, DEFAULT_GUIDANCE)
-    return f"{_base()}\n\n[이번 발화의 분류] {primary}\n[접근 지침] {guidance}{_rag(chunks)}"
+    head = f"[이번 발화의 분류] {primary}"
+    if secondary:
+        head += f" (함께 관찰됨: {', '.join(secondary)})"
+    body = f"\n[접근 지침] {guidance}"
+    for label in secondary:
+        body += (f"\n[보조 지침 — {label}] {LABEL_GUIDANCE.get(label, DEFAULT_GUIDANCE)} "
+                 "(주 접근을 유지하며 참고만 합니다)")
+    return f"{_base()}\n\n{head}{body}{_rag(chunks)}"
 
 
-def build_supportive(primary: str, chunks: list[dict]) -> str:
-    """'정상' 발화용: 왜곡 교정 없이 지지·공감 중심."""
+def build_supportive(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
+    """'정상' 발화용: 왜곡 교정 없이 지지·공감 중심. (secondary 미사용)"""
     return f"{_base()}\n\n[접근 지침] 인지왜곡 교정을 시도하지 말고 지지·공감·감정 반영 중심으로 응답합니다.{_rag(chunks)}"
 
 
-def build_clarify(primary: str, chunks: list[dict]) -> str:
+def build_clarify(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
     """'불충분'/저확신 발화용: 단정하지 않고 상황을 더 물어보는 명확화 질문 중심."""
     return (f"{_base()}\n\n[접근 지침] 상황 정보가 부족합니다. 짧게 공감한 뒤, "
             "무슨 일이 있었는지 구체적으로 들려달라는 명확화 질문 중심으로 응답합니다.")
@@ -192,7 +205,7 @@ def build_clarify(primary: str, chunks: list[dict]) -> str:
 # --- '불충분' 완화 사다리 2~4차 전략 (구획 1 의 INSUFFICIENT_LADDER 와 짝) ---
 # 같은 명확화 질문을 반복하면 취조처럼 느껴진다 — 단계마다 질문의 각도와 무게를 바꾼다.
 
-def build_clarify_alt(primary: str, chunks: list[dict]) -> str:
+def build_clarify_alt(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
     """2차: 직전에 물었던 것과 '다른 각도'로 접근한다 (상황을 물었으면 감정을, 감정을
     물었으면 상황·시점을). 같은 질문의 반복이라는 인상을 지우는 게 목적."""
     return (f"{_base()}\n\n[접근 지침] 조금 전에도 상황을 여쭤봤지만 아직 구체적인 "
@@ -201,7 +214,7 @@ def build_clarify_alt(primary: str, chunks: list[dict]) -> str:
             "감정을 물었다면 언제부터였는지를. 질문은 한 개만, 부드럽게.")
 
 
-def build_clarify_light(primary: str, chunks: list[dict]) -> str:
+def build_clarify_light(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
     """3차: 대답의 부담 자체를 낮춘다. 긴 설명을 요구하지 않는다."""
     return (f"{_base()}\n\n[접근 지침] 내담자가 말을 아끼고 있습니다. 자세한 설명을 "
             "요구하지 말고, 아주 가볍게 답할 수 있는 질문 하나로 낮춥니다 — "
@@ -209,7 +222,7 @@ def build_clarify_light(primary: str, chunks: list[dict]) -> str:
             "대답하지 않아도 괜찮다는 여지를 함께 남깁니다.")
 
 
-def build_accompany(primary: str, chunks: list[dict]) -> str:
+def build_accompany(primary: str, chunks: list[dict], secondary: tuple = ()) -> str:
     """4차(수용·동행 모드): 질문을 멈춘다. 연속된 짧은 대답은 말하기 어렵다는 신호로
     해석하고, 캐묻는 대신 곁에 머무른다. '잘 지내고 있다'고 가정하지 않는다."""
     return (f"{_base()}\n\n[접근 지침] 내담자가 여러 차례 짧게만 답했습니다. 이는 지금 "
@@ -231,10 +244,15 @@ PROMPT_STRATEGIES = {
 
 
 def build_llm_messages(strategy: str, primary: str, chunks: list[dict],
-                       prior_messages: list[dict], user_text: str) -> list[dict]:
-    """LLM 에 보낼 최종 메시지 목록: [시스템 프롬프트, 이전 대화..., 이번 발화]."""
+                       prior_messages: list[dict], user_text: str,
+                       secondary_labels: list[str] | None = None) -> list[dict]:
+    """LLM 에 보낼 최종 메시지 목록: [시스템 프롬프트, 이전 대화..., 이번 발화].
+
+    secondary_labels: 멀티라벨 분류기가 함께 선택한 부차 왜곡들 (cbt_label_guided
+    전략만 보조 지침으로 사용, 나머지 전략은 무시). flow 가 상한 적용 후 전달.
+    """
     build = PROMPT_STRATEGIES.get(strategy, build_cbt_label_guided)
-    return [{"role": "system", "content": build(primary, chunks)},
+    return [{"role": "system", "content": build(primary, chunks, tuple(secondary_labels or ()))},
             *prior_messages,
             {"role": "user", "content": user_text}]
 

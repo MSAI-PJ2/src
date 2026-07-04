@@ -631,6 +631,11 @@ Partition key: /session_id
 `analysis` 는 SSE meta 이벤트(§9)와 동일한 관측 필드로, user 턴과 assistant 턴의
 `policy` 양쪽에 저장된다 (위기·빈 답변 턴에서도 user 턴 쪽 기록은 남는다).
 
+assistant 턴 `policy.secondary_labels` (선택 필드, 2026-07 멀티라벨 보조 지침): 분류기가
+primary 와 **함께 선택한**(selected=true, threshold 이상) 부차 왜곡 중 프롬프트에 보조
+지침으로 실제 주입된 라벨 목록 — 주입이 없던 턴에는 필드 자체가 없다.
+관련 env: `LABEL_GUIDANCE_MAX`(기본 2 = 주 지침 + 보조 1, 1 = 보조 끔).
+
 `GET /v1/sessions/{session_id}` 응답 예시:
 
 ```json

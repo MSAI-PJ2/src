@@ -79,6 +79,12 @@ CLASSIFY_CONTEXT_MAX_CHARS = int(os.getenv("CLASSIFY_CONTEXT_MAX_CHARS", "180"))
 # 0 = 사다리 전체 끔 (0=꺼짐 관례, POLICY_MIN_CONFIDENCE 와 동일). 최소 유효값은 2 권장.
 INSUFFICIENT_ESCAPE_AFTER = int(os.getenv("INSUFFICIENT_ESCAPE_AFTER", "4"))
 
+# --- 멀티라벨 보조 지침: 프롬프트에 넣을 왜곡 접근 지침의 최대 개수 (주 지침 포함) ---
+# 멀티라벨 분류기는 왜곡을 여러 개 동시 선택할 수 있다(threshold 0.55 이상 전부).
+# 기본 2 = 주 지침 + 보조 지침 1개. 지침을 3개 이상 쌓으면 서로 희석되어 답변이
+# 산만해지므로 늘릴 때 주의. 1 = 보조 지침 끔 (primary 단독, 도입 이전 동작).
+LABEL_GUIDANCE_MAX = int(os.getenv("LABEL_GUIDANCE_MAX", "2"))
+
 # --- 위기 지역 연락처 DB (respond/policy.py 구획 3) ---
 # HOTLINE_CONTAINER 를 채우면 켜짐 — 세션과 같은 Cosmos 계정(COSMOS_*)을 쓴다.
 # 실제 배포 DB 예: 컨테이너 kfsp_centers (파티션키 /시도, 필드 기관명·전화·주소·시도·시군구).
