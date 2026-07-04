@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
     MODEL_VERSION=multi_large_v2 \
     CLASSIFY_MODE=multi_label \
     DEFAULT_THRESHOLD=0.55 \
-    MAX_LENGTH=160
+    MAX_LENGTH=128
 
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 

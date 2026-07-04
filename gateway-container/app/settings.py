@@ -54,9 +54,12 @@ CONTENT_SAFETY_TIMEOUT = float(os.getenv("CONTENT_SAFETY_TIMEOUT", "5"))
 # (라벨 가산점 rerank 는 2026-07 제거 — respond/flow.py [구획 3] 주석 참고)
 RAG_TOP_N = int(os.getenv("RAG_TOP_N", os.getenv("RERANK_TOP_N", "4")))
 
-# --- 컨텍스트 정책: 저확신 강등 하한 ---
+# --- 컨텍스트 정책: 저확신 강등 하한 (추가분) ---
 # 왜곡 라벨인데 확신이 이 값 미만이면 CBT 프롬프트 대신 명확화(clarify)로 강등.
-# 0 = 꺼짐(현행). sigmoid multi_label 모델은 점수가 낮게 깔리므로 값 설정 시 주의.
+# 이 노브와 별개로, 분류기 응답의 threshold(배포 0.55)는 항상 왜곡 단정의 기본
+# 하한으로 적용된다(policy.resolve — 멀티라벨 argmax 는 threshold 검사를 안 받으므로).
+# 참고: 배포 multi_large_v2 실측 확신값은 0.8~0.99 대(낮게 깔리지 않음) — 이 값을
+# 0.6~0.7 로 올리는 실험도 안전한 편. 0 = 추가 하한 없음(기본 threshold 만 적용).
 POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
 
 # --- 컨텍스트 병합: 선행 필터 (분류 "전에" 병합/단독을 결정 — 턴당 분류기 호출 항상 1회) ---

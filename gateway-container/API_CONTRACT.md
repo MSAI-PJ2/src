@@ -219,7 +219,10 @@ POST /v1/batch-classify
 }
 ```
 
-`results[]`의 각 원소는 `/v1/classify`의 단일 응답과 같은 구조를 따른다.
+원소는 평면 구조가 아니라 **래퍼**다 — `result` 안쪽이 `/v1/classify`의 단일 응답과 같은
+구조이고, 실제 형태는 `{"index": 0, "ok": true, "error": null, "result": {...}}` 이다.
+**소비자는 반드시 `ok` 를 검사**해야 한다: ok=false 항목(빈 문자열 등)은 result=null 에
+error 문자열만 있다 — 이를 라벨 결과로 읽으면 배치 추출이 조용히 오염된다.
 
 ## 7. Respond 공통 계약
 
@@ -347,6 +350,18 @@ progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
   "tts": null,
   "analysis": {"context_merged": false, "merge_trigger": null, "merge_rejected_by": null, "ladder_step": 1}
 }
+```
+
+`meta` 의 분류 필드 (멀티라벨 주의):
+
+```text
+primary/mode/labels: /v1/classify(§5)와 같은 구조. labels 는 예시처럼 빈 배열이 아니라
+  **12개 전체** [{label, score, selected}] 가 온다 — 동시 왜곡 뱃지(최대 4개)는
+  labels[].selected 가 소스다. primary 하나만 렌더링하면 함께 관찰된 왜곡이 유실된다.
+threshold 는 meta 에 없다 — selected 판정 기준이 필요하면 §5 참조. 원문 재분류 금지:
+  병합 분류 턴에서는 /v1/classify(원문) 결과와 meta(병합문 결과)가 다를 수 있다.
+빈 입력 경로(§7 실패 경로)의 meta 에는 primary/mode/labels/analysis 가 **아예 없다** —
+  meta 파서는 필드 존재를 확인하고 접근할 것.
 ```
 
 `analysis` (추가 계약, 하위 호환 — 없는 것으로 취급해도 무방):
@@ -610,6 +625,7 @@ Partition key: /session_id
       "input": {"input_type":"text"},
       "tts": null,
       "analysis": {"context_merged": false, "merge_trigger": null, "merge_rejected_by": null, "ladder_step": 1},
+      "selected_labels": [{"label": "불충분", "score": 0.5244}],
       "ts": "2026-07-01T00:00:01+00:00"
     },
     {
@@ -632,6 +648,11 @@ Partition key: /session_id
 단독 라벨이 필요한 소비자(재학습 데이터 추출, 라벨 분포 분석)는 이 필드로 걸러낼 것.
 `analysis` 는 SSE meta 이벤트(§9)와 동일한 관측 필드로, user 턴과 assistant 턴의
 `policy` 양쪽에 저장된다 (위기·빈 답변 턴에서도 user 턴 쪽 기록은 남는다).
+
+user 턴 `selected_labels` (2026-07 멀티라벨 전체 기록): 분류기가 선택한(selected=true)
+라벨 전체를 [{label, score}] 로 score 내림차순 저장 — 학습 데이터가 최대 4개 동시 라벨을
+포함하므로 primary 하나만으로는 분류 결과가 유실된다. 왜곡 히스토리·집계·재학습 추출은
+`primary` 가 아니라 이 필드를 기준으로 한다 (primary = 라우팅 대표값).
 
 assistant 턴 `policy.secondary_labels` (선택 필드, 2026-07 멀티라벨 보조 지침): 분류기가
 primary 와 **함께 선택한**(selected=true, threshold 이상) 부차 왜곡 중 프롬프트에 보조

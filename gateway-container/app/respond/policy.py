@@ -88,11 +88,21 @@ def resolve(safety: dict, classification: dict, ladder_step: int = 0) -> Context
     if not safety.get("safe", True):
         return CRISIS_POLICY
     primary = classification.get("primary", "")
-    # 저확신 강등: 왜곡 라벨인데 확신이 하한 미만이면 단정하지 않고 명확화로 (기본 꺼짐)
-    if settings.POLICY_MIN_CONFIDENCE > 0 and primary not in ("정상", "불충분", ""):
+    # 저확신 강등 — 멀티라벨의 구멍을 여기서 막는다 (2026-07-04 전수검수 확정 결함):
+    # 멀티라벨에서 primary 는 sigmoid argmax 라 threshold 검사를 받지 않는다. 즉 12라벨
+    # 전부 threshold(0.55) 미만인 "미검출" 발화도 argmax 왜곡이 primary 로 온다.
+    # 그래서 "왜곡으로 단정해도 되는가"의 하한을 라우팅에서 완성한다:
+    #   하한 = max(POLICY_MIN_CONFIDENCE, 분류기 응답의 threshold — 배포 0.55)
+    # 배포 실측 확신값은 0.8~0.99 대라 정상적인 왜곡 발화는 영향받지 않고,
+    # OOD/애매 발화(예: 최고점 0.41)만 단정 대신 clarify 로 강등된다.
+    if primary not in ("정상", "불충분", ""):
         confidence = next((l.get("score", 0.0) for l in classification.get("labels", [])
                            if l.get("label") == primary), 0.0)
-        if confidence < settings.POLICY_MIN_CONFIDENCE:
+        try:
+            model_threshold = float(classification.get("threshold") or 0.0)
+        except (TypeError, ValueError):
+            model_threshold = 0.0
+        if confidence < max(settings.POLICY_MIN_CONFIDENCE, model_threshold):
             return LOW_CONFIDENCE_POLICY
     # 연속 '불충분'이면 사다리에서 단계에 맞는 정책을 고른다.
     # ESCAPE_AFTER <= 0 은 사다리 전체 끔 (flow 가 ladder_step 을 0 으로 유지하지만

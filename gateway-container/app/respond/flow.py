@@ -505,8 +505,14 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     # (저장하는 primary 는 병합 분류까지 끝난 "최종" 라벨 — 다음 턴의 선행 필터·사다리가
     #  이 값을 본다. analysis 를 사용자 턴에도 남겨야 "병합으로 얻은 라벨"을 원발화 라벨과
     #  구분해 집계·재학습 추출에서 걸러낼 수 있다 — 위기·빈 답변 턴도 기록이 남도록 여기서 저장)
+    # 멀티라벨 선택 결과 전체를 세션에 남긴다 — 학습 데이터가 최대 4개 동시 라벨까지
+    # 포함하므로 primary 만 저장하면 동시 왜곡 정보가 유실된다 (재현 지적, 2026-07-04)
+    selected_labels = [{"label": l["label"], "score": round(float(l.get("score", 0.0)), 4)}
+                       for l in sorted(cls["labels"], key=lambda l: -float(l.get("score", 0.0)))
+                       if l.get("selected")]
     await session_repository.append_turn(
-        session_id, user_turn(text, primary, safety, input_meta, tts, analysis=analysis))
+        session_id, user_turn(text, primary, safety, input_meta, tts,
+                              analysis=analysis, selected_labels=selected_labels))
     snap = await session_repository.snapshot(session_id)
     yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls, analysis))
 

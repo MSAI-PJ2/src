@@ -32,7 +32,10 @@ def load_threshold(model_dir: str, default: float) -> float:
         return default
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return float(data.get("threshold", default))
+    # 4자리 반올림: 점수도 4자리로 반올림해 비교하므로(_score_one) 기준값도 같은
+    # 정밀도로 맞춘다. 튜닝 산출물의 부동소수점 노이즈(예: 0.5500000000000002)가
+    # 경계 밴드 [0.55, 0.55005) 라벨을 조용히 탈락시키던 문제의 수정 (2026-07-04 검수).
+    return round(float(data.get("threshold", default)), 4)
 
 
 

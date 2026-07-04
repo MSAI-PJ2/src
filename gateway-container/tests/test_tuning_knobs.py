@@ -70,3 +70,16 @@ def test_crisis_overrides_floor(monkeypatch):
     monkeypatch.setattr(settings, "POLICY_MIN_CONFIDENCE", 0.99)
     policy = context_policy.resolve({"safe": False, "reason": "self_harm"}, _cls("낙인찍기", 0.01, False))
     assert policy.is_crisis
+
+
+def test_model_threshold_is_default_floor(monkeypatch):
+    """멀티라벨 미검출 방어(2026-07-04 전수검수): primary(argmax)가 왜곡인데 점수가
+    분류기 threshold 미만이면 — 12라벨 전부 미달인 OOD 발화 — 단정하지 않고 강등한다."""
+    monkeypatch.setattr(settings, "POLICY_MIN_CONFIDENCE", 0.0)
+    safety = {"safe": True}
+    low = {**_cls("낙인찍기", 0.41, True), "threshold": 0.55}
+    assert context_policy.resolve(safety, low).name == "low_confidence_clarify"
+    ok = {**_cls("낙인찍기", 0.83, True), "threshold": 0.55}
+    assert context_policy.resolve(safety, ok).name == "cbt_label_guided"
+    # threshold 필드가 없으면(구형 호출) 추가 하한 없이 기존 동작 유지
+    assert context_policy.resolve(safety, _cls("낙인찍기", 0.41, True)).name == "cbt_label_guided"

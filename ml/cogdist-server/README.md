@@ -62,7 +62,7 @@ MODEL_ID=klue/roberta-large
 MODEL_VERSION=multi_large_v2
 CLASSIFY_MODE=multi_label
 DEFAULT_THRESHOLD=0.55
-MAX_LENGTH=160
+MAX_LENGTH=128
 ```
 
 ## ACR 빌드 예시
@@ -97,7 +97,7 @@ az containerapp update \
     MODEL_VERSION=multi_large_v2 \
     CLASSIFY_MODE=multi_label \
     DEFAULT_THRESHOLD=0.55 \
-    MAX_LENGTH=160
+    MAX_LENGTH=128
 ```
 
 모델 파일은 기존처럼 Azure Files 볼륨 `modelstore`, subPath `v2`, mountPath `/models/cogdist`를 유지합니다.
@@ -158,7 +158,7 @@ az containerapp update \
     MODEL_VERSION=multi_large_v2 \
     CLASSIFY_MODE=multi_label \
     DEFAULT_THRESHOLD=0.55 \
-    MAX_LENGTH=160
+    MAX_LENGTH=128
 ```
 
 배포 상태 확인:
