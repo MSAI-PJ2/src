@@ -345,22 +345,24 @@ progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
   "labels": [],
   "input": {"input_type":"text"},
   "tts": null,
-  "analysis": {"context_merged": false, "merge_rejected_by": null, "ladder_step": 1}
+  "analysis": {"context_merged": false, "merge_trigger": null, "merge_rejected_by": null, "ladder_step": 1}
 }
 ```
 
 `analysis` (추가 계약, 하위 호환 — 없는 것으로 취급해도 무방):
 
 ```text
-context_merged     true 면 primary/labels 가 "직전 발화 병합 재분류" 결과
-                   ('불충분' 단독 판정을 직전 맥락과 합쳐 1회 재분류하는 기능)
-merge_rejected_by  "novelty" = 화제 전환(새 내용어) 감지로 병합을 포기하고 단독 결과 유지
+context_merged     true 면 primary/labels 가 "병합문 분류" 결과 — 선행 필터가 분류 전에
+                   직전 라벨·발화 길이로 병합을 결정 (분류기 호출은 턴당 항상 1회)
+merge_trigger      병합을 발동시킨 트리거: "prev_insufficient"(직전 턴 불충분) |
+                   "short_utterance"(단문 파편) | null(병합 안 함)
+merge_rejected_by  "novelty" = 화제 전환(새 내용어) 감지로 병합을 포기하고 단독 분류 유지
 ladder_step        이번 턴 포함 연속 '불충분' 횟수 (0 = 불충분 아님).
                    2·3 = 완화된 명확화 질문, INSUFFICIENT_ESCAPE_AFTER(기본 4)부터
                    질문을 멈추는 수용·동행 모드 (assistant policy = insufficient_accompany)
-관련 env           CLASSIFY_RETRY_ON_INSUFFICIENT(병합 재분류만 끔/켬)
+관련 env           CLASSIFY_PREMERGE(병합 끔/켬) / CLASSIFY_PREMERGE_SHORT_CHARS(20, 0=① 만)
                    / CLASSIFY_CONTEXT_MAX_TURNS(3, 0=병합 끔) / CLASSIFY_CONTEXT_MAX_CHARS(180)
-                   / INSUFFICIENT_ESCAPE_AFTER(4, 0=사다리 끔 — 두 기능 스위치는 분리)
+                   / INSUFFICIENT_ESCAPE_AFTER(4, 0=사다리 끔 — 병합과 스위치 분리)
 ```
 
 ## 10. Respond - transcript 입력
@@ -607,7 +609,7 @@ Partition key: /session_id
       "safety_reason": null,
       "input": {"input_type":"text"},
       "tts": null,
-      "analysis": {"context_merged": false, "merge_rejected_by": null, "ladder_step": 1},
+      "analysis": {"context_merged": false, "merge_trigger": null, "merge_rejected_by": null, "ladder_step": 1},
       "ts": "2026-07-01T00:00:01+00:00"
     },
     {

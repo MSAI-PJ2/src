@@ -203,47 +203,74 @@ def _respond(client, sid, text):
     return sse_events(r)
 
 
-def test_twopass_recovers_label_with_merge(harness):
-    """1턴 왜곡 → 2턴 이어말하기 파편: 단독 '불충분'이 병합 재분류로 왜곡을 되찾는다."""
-    client, clf = harness(["흑백 사고", "불충분", "흑백 사고"])
+def test_premerge_short_fragment_recovers(harness):
+    """1턴 왜곡 → 2턴 단문 파편: 선행 필터가 트리거 ②(단문)로 병합문을 "1회" 분류한다."""
+    client, clf = harness(["흑백 사고", "흑백 사고"])
     sid = f"merge-{uuid.uuid4()}"
 
     ev1 = _respond(client, sid, ANCHOR)
-    assert _meta(ev1)["primary"] == "흑백 사고"
     assert _meta(ev1)["analysis"] == {"context_merged": False, "merge_rejected_by": None,
-                                      "ladder_step": 0}
+                                      "merge_trigger": None, "ladder_step": 0}
 
     ev2 = _respond(client, sid, "네 그냥 그래요.")
     meta = _meta(ev2)
-    assert meta["primary"] == "흑백 사고"            # 병합 재분류 결과가 최종
+    assert meta["primary"] == "흑백 사고"                 # 병합문 분류 결과가 곧 최종
     assert meta["analysis"]["context_merged"] is True
-    assert meta["analysis"]["ladder_step"] == 0      # 최종 라벨이 불충분이 아니므로 0
-    # 3번째 분류기 호출 입력 = "직전 발화 + 현재 발화" 병합문
-    assert clf.calls[-1] == f"{ANCHOR} 네 그냥 그래요."
+    assert meta["analysis"]["merge_trigger"] == "short_utterance"
+    assert meta["analysis"]["ladder_step"] == 0
+    # 핵심 속성: 턴당 분류기 호출 정확히 1회 (twopass 의 2회 호출 병목 제거)
+    assert len(clf.calls) == 2
+    assert clf.calls[-1] == f"{ANCHOR} 네 그냥 그래요."   # 두 번째 "호출 입력"이 병합문
 
-    # 세션 기록: 사용자 턴 primary 도 최종(회복된) 라벨로 저장돼야 다음 턴 사다리가 맞다
     snap = client.get(f"/v1/sessions/{sid}").json()
     user_turns = [t for t in snap["turns"] if t["role"] == "user"]
-    assert user_turns[-1]["primary"] == "흑백 사고"
+    assert user_turns[-1]["primary"] == "흑백 사고"       # 저장 라벨 = 병합 최종
+
+
+def test_premerge_prev_insufficient_trigger(harness):
+    """트리거 ①: 직전 턴이 불충분이면 (단문이 아니어도) 병합 — 조응 발화로 게이트 통과."""
+    client, clf = harness(["불충분", "성급한 판단"])
+    sid = f"prev-{uuid.uuid4()}"
+
+    _respond(client, sid, "몰라요.")                       # 1턴: 단독 → 불충분
+    ev2 = _respond(client, sid, "그 생각 때문에 계속 잠을 설치고 있어요.")   # 22자 — 단문 아님
+    meta = _meta(ev2)
+    assert meta["analysis"]["merge_trigger"] == "prev_insufficient"
+    assert meta["analysis"]["context_merged"] is True
+    assert meta["primary"] == "성급한 판단"
+    assert len(clf.calls) == 2                             # 여전히 턴당 1회
+
+
+def test_premerge_long_utterance_stays_single(harness):
+    """트리거 없음: 직전이 왜곡(확신)이고 현재가 장문이면 단독 분류 — 병합 미발동."""
+    client, clf = harness(["흑백 사고", "성급한 판단"])
+    sid = f"long-{uuid.uuid4()}"
+
+    _respond(client, sid, ANCHOR)
+    text = "그 생각 때문에 요즘 계속 잠을 설치고 있어요."     # 25자 > SHORT_CHARS
+    meta = _meta(_respond(client, sid, text))
+    assert meta["analysis"]["context_merged"] is False
+    assert meta["analysis"]["merge_trigger"] is None
+    assert clf.calls[-1] == text                           # 분류 입력 = 원문 그대로
 
 
 def test_novelty_gate_rejects_topic_shift(harness):
-    """화제 전환 발화는 병합을 기각하고 '불충분'(명확화)을 유지한다 — 오염 방지."""
+    """화제 전환 발화는 트리거가 걸려도 게이트가 병합을 기각 — 단독 분류 유지 (오염 방지)."""
     client, clf = harness(["흑백 사고", "불충분"])
     sid = f"shift-{uuid.uuid4()}"
 
     _respond(client, sid, ANCHOR)
-    ev2 = _respond(client, sid, "아 점심에 김치찌개 먹었어요.")
+    ev2 = _respond(client, sid, "아 점심에 김치찌개 먹었어요.")   # 16자 → 단문 트리거, 게이트 기각
     meta = _meta(ev2)
-    assert meta["primary"] == "불충분"               # 직전 왜곡으로 끌려가지 않음
+    assert meta["primary"] == "불충분"                     # 직전 왜곡으로 끌려가지 않음
     assert meta["analysis"]["merge_rejected_by"] == "novelty"
-    assert meta["analysis"]["context_merged"] is False
-    assert len(clf.calls) == 2                       # 재분류 호출 자체가 없었다 (비용 절감)
+    assert meta["analysis"]["context_merged"] is False and meta["analysis"]["merge_trigger"] is None
+    assert clf.calls[-1] == "아 점심에 김치찌개 먹었어요."   # 분류 입력 = 원문
 
 
 def test_insufficient_ladder_to_accompany(harness):
     """연속 '불충분' 4턴: 정책이 clarify → alt → light → 수용·동행으로 계단을 오른다."""
-    client, _ = harness(["불충분"])                   # 큐 소진 후엔 계속 '불충분'
+    client, clf = harness(["불충분"])                       # 큐 소진 후엔 계속 '불충분'
     sid = f"ladder-{uuid.uuid4()}"
 
     steps = []
@@ -251,49 +278,63 @@ def test_insufficient_ladder_to_accompany(harness):
         meta = _meta(_respond(client, sid, text))
         steps.append(meta["analysis"]["ladder_step"])
     assert steps == [1, 2, 3, 4]
+    assert len(clf.calls) == 4                             # 병합이 있어도 호출은 턴당 1회
 
     snap = client.get(f"/v1/sessions/{sid}").json()
     names = [t["policy"]["name"] for t in snap["turns"]
              if t["role"] == "assistant" and t.get("policy")]
     assert names == ["insufficient_clarify", "insufficient_clarify_alt",
                      "insufficient_clarify_light", "insufficient_accompany"]
-    # 저장된 policy 메타에 관측 필드가 함께 남는다 (운영 집계용)
     last = [t for t in snap["turns"] if t["role"] == "assistant"][-1]
     assert last["policy"]["ladder_step"] == 4
 
 
 def test_normal_turn_resets_ladder(harness):
-    """중간에 정상/왜곡 턴이 나오면 연쇄가 끊기고 사다리가 1부터 다시 시작한다."""
-    # 큐 순서 주의: 2턴은 단독+병합 재분류로 분류기를 2번 부른다 (불충분 2개 소비)
-    client, _ = harness(["불충분", "불충분", "불충분", "정상"])
+    """중간에 정상 턴이 나오면 연쇄가 끊기고 사다리가 1부터 다시 시작한다."""
+    # 큐: t1 단독(불충분) · t2 병합(불충분) · t3 단독-게이트기각(정상) · t4 병합(기본값 불충분)
+    client, _ = harness(["불충분", "불충분", "정상"])
     sid = f"reset-{uuid.uuid4()}"
 
-    _respond(client, sid, "몰라요.")                  # step 1 (호출 1회)
-    _respond(client, sid, "그냥요.")                  # step 2 (단독 불충분 + 병합도 불충분)
+    _respond(client, sid, "몰라요.")                        # step 1
+    _respond(client, sid, "그냥요.")                        # step 2 (prev_insufficient 병합)
     meta3 = _meta(_respond(client, sid, "오늘은 산책을 다녀와서 기분이 좀 나아요."))
-    assert meta3["analysis"]["ladder_step"] == 0      # 정상 턴 — 사다리 밖
+    assert meta3["analysis"]["merge_rejected_by"] == "novelty"   # 산책 = 새 내용어 → 단독
+    assert meta3["analysis"]["ladder_step"] == 0            # 정상 턴 — 사다리 밖
     meta4 = _meta(_respond(client, sid, "다시 모르겠어요."))
-    assert meta4["analysis"]["ladder_step"] == 1      # 연쇄 리셋 후 1부터
+    assert meta4["analysis"]["ladder_step"] == 1            # 연쇄 리셋 후 1부터
 
 
 # ---------------------------------------------------------------------------
-# 3) 노브 비기본값 계약 — 스위치가 문서대로 동작하는지 고정 (리뷰 지적: 기본값만
-#    테스트하면 "끄는" 경로가 무방비다. 두 기능의 스위치는 분리돼 있다.)
+# 3) 노브 비기본값 계약 — 스위치가 문서대로 동작하는지 고정
 # ---------------------------------------------------------------------------
 
-def test_knob_retry_off_disables_merge_only(harness, monkeypatch):
-    """CLASSIFY_RETRY_ON_INSUFFICIENT=false: 병합 재분류만 꺼진다 — 사다리는 계속 동작."""
+def test_knob_premerge_off(harness, monkeypatch):
+    """CLASSIFY_PREMERGE=false: 병합 자체가 꺼진다 — 사다리는 별도 스위치라 계속 동작."""
     from app import settings as app_settings
-    monkeypatch.setattr(app_settings, "CLASSIFY_RETRY_ON_INSUFFICIENT", False)
+    monkeypatch.setattr(app_settings, "CLASSIFY_PREMERGE", False)
     client, clf = harness(["불충분"])
-    sid = f"knob-retry-{uuid.uuid4()}"
+    sid = f"knob-pre-{uuid.uuid4()}"
 
     m1 = _meta(_respond(client, sid, "몰라요."))
     m2 = _meta(_respond(client, sid, "그냥요."))
-    assert len(clf.calls) == 2                        # 턴당 1회 — 재분류 호출 없음
+    assert len(clf.calls) == 2 and clf.calls[-1] == "그냥요."   # 병합 입력 없음
     assert m2["analysis"]["context_merged"] is False
-    assert m2["analysis"]["ladder_step"] == 2         # 사다리는 별도 스위치라 계속 오른다
-    assert m1["analysis"]["ladder_step"] == 1
+    assert m1["analysis"]["ladder_step"] == 1 and m2["analysis"]["ladder_step"] == 2
+
+
+def test_knob_short_chars_zero_prev_only(harness, monkeypatch):
+    """SHORT_CHARS=0: 단문 트리거 끔 — 직전 라벨(불충분) 필터만 동작하는 순수 ① 모드."""
+    from app import settings as app_settings
+    monkeypatch.setattr(app_settings, "CLASSIFY_PREMERGE_SHORT_CHARS", 0)
+    client, clf = harness(["흑백 사고", "불충분", "흑백 사고"])
+    sid = f"knob-short-{uuid.uuid4()}"
+
+    _respond(client, sid, ANCHOR)
+    m2 = _meta(_respond(client, sid, "네 그냥 그래요."))     # prev=왜곡·단문트리거 꺼짐 → 단독
+    assert m2["analysis"]["context_merged"] is False and m2["primary"] == "불충분"
+    m3 = _meta(_respond(client, sid, "어제도 그랬어요."))    # prev=불충분 → ① 발동 → 병합
+    assert m3["analysis"]["merge_trigger"] == "prev_insufficient"
+    assert m3["primary"] == "흑백 사고"
 
 
 def test_knob_ladder_off(harness, monkeypatch):
@@ -309,7 +350,7 @@ def test_knob_ladder_off(harness, monkeypatch):
     snap = client.get(f"/v1/sessions/{sid}").json()
     names = {t["policy"]["name"] for t in snap["turns"]
              if t["role"] == "assistant" and t.get("policy")}
-    assert names == {"insufficient_clarify"}          # alt/light/accompany 미발동
+    assert names == {"insufficient_clarify"}                # alt/light/accompany 미발동
 
 
 def test_knob_max_turns_zero_disables_merge(harness, monkeypatch):
@@ -321,6 +362,6 @@ def test_knob_max_turns_zero_disables_merge(harness, monkeypatch):
 
     _respond(client, sid, ANCHOR)
     m2 = _meta(_respond(client, sid, "네 그냥 그래요."))
-    assert len(clf.calls) == 2                        # 병합 재분류 시도 없음
+    assert len(clf.calls) == 2 and clf.calls[-1] == "네 그냥 그래요."
     assert m2["primary"] == "불충분"
     assert m2["analysis"]["context_merged"] is False and m2["analysis"]["merge_rejected_by"] is None

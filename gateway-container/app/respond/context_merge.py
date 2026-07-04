@@ -172,6 +172,22 @@ def recent_user_texts(turns: list[dict[str, Any]]) -> list[str]:
             and t.get("safety") != "blocked"]
 
 
+def last_user_label(turns: list[dict[str, Any]]) -> str | None:
+    """마지막 유효한 사용자 턴의 최종 라벨 — 선행 필터의 트리거 판단용.
+
+    trailing_insufficient 와 같은 기준으로 본다: 텍스트 없는 이벤트 턴(STT/OCR 실패)이나
+    차단(blocked)된 턴이 마지막이면 "직전 맥락 없음"(None) 취급 — 그 턴 너머의 옛
+    라벨을 끌어와 병합을 발동시키지 않는다.
+    """
+    for t in reversed(turns):
+        if t.get("role") != "user":
+            continue
+        if not (t.get("text") or "").strip() or t.get("safety") == "blocked":
+            return None
+        return t.get("primary")
+    return None
+
+
 def trailing_insufficient(turns: list[dict[str, Any]]) -> int:
     """직전에서부터 연속으로 '불충분'이었던 사용자 턴 수 (완화 사다리 단계 계산용).
 

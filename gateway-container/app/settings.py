@@ -59,14 +59,20 @@ RAG_TOP_N = int(os.getenv("RAG_TOP_N", os.getenv("RERANK_TOP_N", "4")))
 # 0 = 꺼짐(현행). sigmoid multi_label 모델은 점수가 낮게 깔리므로 값 설정 시 주의.
 POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
 
-# --- 컨텍스트 병합 재분류 (twopass) ---
-# 단독 분류가 '불충분'일 때 직전 발화들과 합쳐 1회 재분류한다 (respond/context_merge.py).
-# 노브 근거 = 배포와 동일 가중치(multi_large_v2·멀티라벨)로 120시나리오/380턴 재측정
-# (gateway_convergence_e2e_2026-07-04): 파편 턴 회복 0.04(현행) → 0.56 · 화제전환 오염 0.00
-# · 잡담 날조 0.00 · 정상 오탐 0.00 · 분류기 호출 1.35/턴.
-# ※ 이 플래그는 "병합 재분류"만 끈다 — 아래 완화 사다리는 별도 노브(ESCAPE_AFTER=0)로 끈다.
-CLASSIFY_RETRY_ON_INSUFFICIENT = _bool("CLASSIFY_RETRY_ON_INSUFFICIENT", True)
-# 병합에 끌어올 직전 사용자 발화 수 — 3이 2보다 회복률 우위 (0.56 vs 0.40, 배포 가중치 기준). 0 = 병합 끔
+# --- 컨텍스트 병합: 선행 필터 (분류 "전에" 병합/단독을 결정 — 턴당 분류기 호출 항상 1회) ---
+# 설계 변경(2026-07-04, 재현 지시): 이전 twopass(단독 분류 후 불충분이면 재분류)는 불충분
+# 턴마다 분류기를 2회 호출해 CPU 서빙 병목(4vCPU 요구)이 됐다. 지금은 이미 로드된 세션에서
+# 직전 라벨을 확인하는 "선행 필터"가 분류 입력(단독문/병합문)을 미리 고른다 — 추가 지연 0.
+# 트리거(둘 중 하나, 단 novelty 게이트 통과 시에만 병합):
+#   ① 직전 사용자 턴 라벨 = 불충분  (clarify 에 대한 재발화 — 수렴 케이스)
+#   ② 현재 발화가 단문(SHORT_CHARS 이하) — 불충분의 길이 프록시. 파편이 "처음" 나온
+#      턴(직전=확신 왜곡)을 ①이 못 잡는 구멍을 메운다 (실측: 회복된 파편 전원 16자 이하)
+# ※ twopass 기준 실측(회복 0.04→0.56 · 오염/날조/오탐 0.00)은 참고치 — 선행 필터판의
+#   성능 재검증은 로컬 API 테스트로 수행 예정.
+CLASSIFY_PREMERGE = _bool("CLASSIFY_PREMERGE", True)          # false = 병합 자체를 끔
+# 트리거 ② 의 단문 기준(자). 0 = ② 끔 (직전 라벨 필터만 사용)
+CLASSIFY_PREMERGE_SHORT_CHARS = int(os.getenv("CLASSIFY_PREMERGE_SHORT_CHARS", "20"))
+# 병합에 끌어올 직전 사용자 발화 수 — 3이 2보다 회복률 우위 (twopass 기준 0.56 vs 0.40). 0 = 병합 끔
 CLASSIFY_CONTEXT_MAX_TURNS = int(os.getenv("CLASSIFY_CONTEXT_MAX_TURNS", "3"))
 # 병합문 길이 상한(자) — 분류기 절단선(160토큰 ≈ 300자)의 안전 마진
 CLASSIFY_CONTEXT_MAX_CHARS = int(os.getenv("CLASSIFY_CONTEXT_MAX_CHARS", "180"))
