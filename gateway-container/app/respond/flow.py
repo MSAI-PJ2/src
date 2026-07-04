@@ -302,7 +302,8 @@ def select_chunks(candidates: list[dict], top_n: int | None = None) -> list[dict
 # [구획 4] 입력 형태별 진입 스트림 — 성공하면 전부 [구획 5] respond_stream 으로 합류
 # ══════════════════════════════════════════════════════════════════════════
 
-async def stt_then_respond_stream(session_id=None, input_meta=None, tts=None, llm=None):
+async def stt_then_respond_stream(session_id=None, input_meta=None, tts=None, llm=None,
+                                  user_id: str | None = None):
     """오디오 입력 흐름: 음성→텍스트(STT) 변환 후, 성공하면 일반 상담 흐름으로 넘어간다."""
     context = RespondRequestContext(session_id, None, input_meta or {}, tts, llm)
     session = await session_repository.ensure(context.session_id)  # 세션이 없으면 새로 만든다
@@ -330,11 +331,12 @@ async def stt_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
     # 거기서도 같은 단계 계획(총 단계 수)으로 seq/total 을 계산하게 한다.
     yield sse(progress_event(session_id, "extract", stage_plan(extracted=True, tts=tts)))
     async for event in respond_stream(context.text or "", session_id, context.input_meta, tts, llm,
-                                      extracted=True):
+                                      extracted=True, user_id=user_id):
         yield event  # respond_stream 이 내보내는 이벤트를 그대로 통과시킨다
 
 
-async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, llm=None):
+async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, llm=None,
+                                  user_id: str | None = None):
     """이미지 입력: OCR → ocr 이벤트 → 추출된 사용자 텍스트로 일반 상담 흐름으로.
 
     STT 흐름과 대칭 구조. 이미지 해석은 ocr.profile 로 갈린다 (services/document_ocr.py):
@@ -377,7 +379,8 @@ async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
     yield sse(ocr_result_event(session_id, result))
     # [progress] 1단계(extract) 완료 신고: 이미지 → 텍스트(OCR) 변환이 끝났다 (STT 흐름과 대칭).
     yield sse(progress_event(session_id, "extract", stage_plan(extracted=True, tts=tts)))
-    async for event in respond_stream(user_text, session_id, stored_meta, tts, llm, extracted=True):
+    async for event in respond_stream(user_text, session_id, stored_meta, tts, llm,
+                                      extracted=True, user_id=user_id):
         yield event
 
 
@@ -406,9 +409,14 @@ async def input_pending_stream(session_id=None, input_meta=None, tts=None):
 # ══════════════════════════════════════════════════════════════════════════
 
 async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, llm=None,
-                         extracted: bool = False):
-    """상담 한 턴의 핵심 흐름. extracted=True 면 앞에서 STT/OCR 변환(extract 단계)을
-    이미 거쳤다는 뜻 — progress 신호의 단계 계획(seq/total)에 그 단계를 포함시킨다."""
+                         extracted: bool = False, user_id: str | None = None):
+    """상담 한 턴의 핵심 흐름.
+
+    extracted: 앞에서 STT/OCR 변환(extract 단계)을 이미 거쳤다는 뜻 — progress 신호의
+               단계 계획(seq/total)에 그 단계를 포함시킨다.
+    user_id:   요청자 식별자 (api/v1.py current_user — 가상 ID 또는 Entra oid).
+               위기 분기에서 프로필에 저장된 지역(설문 location)으로 핫라인을 찾을 때 쓴다.
+    """
     # 1) 세션 확보 + 최근 대화 로드 (LLM 이 맥락을 이어가도록 이전 발화들을 가져온다)
     session = await session_repository.ensure(session_id)
     session_id = session["session_id"]
@@ -444,15 +452,17 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
 
     # 4) 위기 분기: LLM 답변 생성 없이 고정 메시지 + 상담 핫라인을 즉시 출력하고 종료
     #    지역(시도)이 정해지고 지역 연락처 DB 가 켜져 있으면 지역 창구를 전국 공통 앞에 붙인다.
-    #    region 은 metadata.region(현행) → user_profiles(휴면) 순으로 resolve_region 이 정한다.
-    #    user_id 배선(Entra oid→flow)은 다음 단계라 지금은 None → 프로필 경로 휴면.
+    #    region 은 metadata.region(프론트 명시) → 프로필(설문 저장 지역) 순으로 정한다.
+    #    user_id 배선 완료: 가상 ID/oid 가 route → 여기까지 전달돼 프로필 경로가 살아 있다.
+    #    resolve_region 은 프로필 조회(DB) 때문에 블로킹일 수 있어 to_thread 로 오프로딩.
     if policy.is_crisis:
         # [progress] 위기 확정 — LLM 생성(generate) 단계가 빠진 위기 경로 계획으로
         # 갱신하고 "방침 결정" 완료를 신고한다. (여기서부터 total 이 1 줄어드는 이유 —
         # 프론트는 곧이어 오는 crisis 이벤트로 위기 화면으로 전환하므로 실용상 무해)
         plan = stage_plan(extracted, tts, crisis=True)
         yield sse(progress_event(session_id, "route", plan))
-        region, district = respond_policy.resolve_region(input_meta, user_id=None)
+        region, district = await asyncio.to_thread(
+            respond_policy.resolve_region, input_meta, user_id)
         payload = await respond_policy.crisis_payload(
             reason=safety.get("reason"), region=region, district=district)
         yield sse(payload)

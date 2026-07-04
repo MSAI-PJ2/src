@@ -16,6 +16,7 @@ import os
 from dataclasses import dataclass
 
 from .. import settings
+from ..profile import profile_repository  # region 프로필 조회 루트 (구획 3)
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +217,6 @@ REGIONAL_HOTLINES_MAX = 3
 KFSP_FIELD_MAP = {"name": "기관명", "phone": "전화", "address": "주소", "type": "유형"}
 
 _hotline_container = None  # Cosmos 컨테이너 — 첫 조회 때 1회 생성해 재사용
-_profile_container = None  # user_profiles 컨테이너 — region DB 조회 루트용
 
 
 def _get_cosmos_client():
@@ -278,51 +278,38 @@ def lookup_regional_hotlines(region: str | None, district: str | None = None) ->
     return out
 
 
-# --- region DB 조회 루트: user_profiles 에서 저장된 지역을 읽는다 (metadata.region 다음 우선순위) ---
-
-def _get_profile_container():
-    """사용자 프로필 컨테이너 연결 (파티션키 /user_id). 배포 DB 는 user_profiles."""
-    global _profile_container
-    if _profile_container is None:
-        database = settings.USER_PROFILE_DATABASE or os.getenv("COSMOS_DATABASE", "")
-        if not database:
-            raise ValueError("profile lookup requires USER_PROFILE_DATABASE or COSMOS_DATABASE")
-        _profile_container = _get_cosmos_client().get_database_client(database) \
-                                                 .get_container_client(settings.USER_PROFILE_CONTAINER)
-    return _profile_container
-
+# --- region 프로필 조회 루트: 설문으로 저장된 지역을 읽는다 (metadata.region 다음 우선순위) ---
 
 def _region_from_profile(user_id: str) -> tuple[str | None, str | None]:
-    """user_profiles 에서 (시도, 시군구) 를 읽는다. 없으면 (None, None) — 블로킹.
+    """프로필 저장소에서 (시도, 시군구) 를 읽는다. 없으면 (None, None) — 블로킹 가능.
 
-    user_profiles 가 비어 있으면 자연히 (None, None) 을 돌려주므로, 프로필이 채워지기 전까지
-    이 경로는 조용히 휴면한다 (죽은 코드가 아니라 데이터 대기 상태)."""
-    rows = _get_profile_container().query_items(
-        query='SELECT c["시도"], c["시군구"] FROM c WHERE c["user_id"] = @uid',
-        parameters=[{"name": "@uid", "value": user_id}],
-        partition_key=user_id)
-    for row in rows:
-        return (row.get("시도") or None, row.get("시군구") or None)
-    return (None, None)
+    저장소(app/profile.py)를 경유한다 — memory(개발)든 Cosmos user_profiles(배포)든
+    같은 코드로 동작하고, 설문 저장(/v1/profile/survey)이 미러해 둔 한글 필드
+    시도/시군구를 그대로 읽는다. 프로필이 없으면 조용히 (None, None)."""
+    item = profile_repository.get(user_id)
+    if not item:
+        return (None, None)
+    return (item.get("시도") or None, item.get("시군구") or None)
 
 
 def resolve_region(input_meta: dict, user_id: str | None = None) -> tuple[str | None, str | None]:
     """이번 요청의 (시도, 시군구) 를 정한다 — 우선순위 체인.
 
-    1순위: metadata.region / metadata.district (프론트 명시 override, 테스트·MVP 경로)
-    2순위: user_profiles DB 조회 (user_id 있고 USER_PROFILE_CONTAINER 켜졌을 때)
+    1순위: metadata.region / metadata.district (프론트 명시 override, 테스트·수동 선택 경로)
+    2순위: 프로필 조회 — 설문(/v1/profile/survey)에 저장된 지역 (가상 ID/oid 기준)
     "정리" 시점: 위치 기반/프로필이 정식화되면 1순위 override 를 테스트 전용으로 강등하고
                 2순위를 승격 — 코드 삭제 없이 우선순위만 바꾸면 된다.
 
-    ※ user_id 는 아직 route(Entra oid)→flow 로 배선되지 않았다. 그전까지 2순위는 휴면이며,
-      배선 검증은 tests/test_v1_contract.py 의 계약 테스트가 가짜 프로필로 대신한다.
+    user_id 배선 완료(가구현 로그인): route(current_user) → flow → 여기까지 전달된다.
+    "anonymous"(가상 ID 미전송)는 공유 계정이라 프로필 지역을 쓰지 않는다 — 다른 사용자의
+    지역이 노출되는 사고 방지. 조회 실패는 경고만 남기고 지역 없이 진행(위기 응답 우선).
     """
     meta = input_meta.get("metadata") or {}
     region = (meta.get("region") or "").strip() or None
     district = (meta.get("district") or "").strip() or None
     if region:
         return (region, district)
-    if user_id and settings.USER_PROFILE_CONTAINER:
+    if user_id and user_id != "anonymous":
         try:
             return _region_from_profile(user_id)
         except Exception as exc:
