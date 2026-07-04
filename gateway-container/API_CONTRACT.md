@@ -675,7 +675,7 @@ AZURE_SEARCH_SEMANTIC_CONFIG=cbt-semantic-config
 CONTENT_SAFETY_ENABLED=true
 CONTENT_SAFETY_ENDPOINT=https://cbt-content-safety.cognitiveservices.azure.com/
 CONTENT_SAFETY_KEY=secretref:cs-key
-CONTENT_SAFETY_THRESHOLD=2
+CONTENT_SAFETY_THRESHOLD=4
 ```
 
 분기 결과:
