@@ -3,7 +3,7 @@
 "무엇을 답할지"(정책·프롬프트·위기 문구)는 respond/policy.py — 이 파일은 순서와 배관만.
 
 구획 목차 (Ctrl+F 로 "[구획" 검색):
-    [구획 1] SSE 이벤트     프론트로 내보내는 메시지 조각들의 형식 (API_CONTRACT 와 1:1)
+    [구획 1] SSE 이벤트     프론트로 내보내는 메시지 조각들의 형식 + 단계 진행 신호(progress)
     [구획 2] 요청 정리      "텍스트/음성/이미지 중 뭐가 왔나" 판단 (RespondRequestContext)
     [구획 3] RAG 선별       검색 결과 중복 제거 후 상위 top_n 개만 고르기
     [구획 4] 진입 스트림    stt(음성)/ocr(이미지)/입력없음 — 성공하면 [구획 5]로 합류
@@ -115,6 +115,63 @@ def tts_event(session_id: str, tts_result: dict) -> dict:
 def done_event(session_id: str) -> dict:
     """이 턴의 스트리밍이 끝났다는 신호 — 항상 마지막 이벤트."""
     return {"type": "done", "session_id": session_id}
+
+
+# ── 단계 진행 신호(progress) ──────────────────────────────────────────────
+# 프론트엔드가 "지금 어디까지 왔는지" 로딩 UI(체크리스트/진행바)를 그릴 수 있도록,
+# 파이프라인의 각 단계가 "끝날 때마다" progress 이벤트를 하나씩 내보낸다.
+#
+# 단계 이름(stage)과 순서 — 요청 형태에 따라 앞뒤가 붙거나 빠진다:
+#   extract   입력 변환: 음성(STT)·이미지(OCR) → 텍스트.  음성/이미지 입력일 때만.
+#   input     상담 문장 접수: 처리할 텍스트가 확정되고 세션(대화방)이 준비됨.
+#   analyze   동시 분석: 안전 점검 + 인지왜곡 분류 + 자료 검색(gather 3종) 완료.
+#   route     응답 방침 결정: 정책 라우팅 + (평상시) 프롬프트 구성까지 완료.
+#   generate  답변 생성: LLM 스트리밍 종료. SSE 에서는 생성과 동시에 token 으로
+#             전송되므로 "생성 완료 = 텍스트 송신 완료"다 (별도 송신 단계 없음).
+#             위기(crisis) 분기는 LLM 을 부르지 않으므로 이 단계가 없다.
+#   speak     음성 합성: TTS 완료.  요청에 tts.enabled=true 일 때만.
+#
+# 이벤트 모양: {"type":"progress","session_id":...,"stage":"analyze",
+#               "seq":2,"total":4,"label":"동시 분석(...) 완료"}
+#   seq/total = 이 요청이 거칠 전체 단계 중 몇 번째가 끝났는지 (진행바용).
+#   ※ 위기 분기가 확정되면 generate 단계가 사라지므로 route 이벤트부터 total 이
+#     1 줄어든다. 프론트는 crisis 이벤트를 받으면 어차피 위기 화면으로 전환하므로
+#     실용상 문제가 없다 (API_CONTRACT 7장 참고).
+#   ※ STT/OCR 실패·입력 없음 경로는 진행할 단계가 없으므로 progress 를 보내지
+#     않고 기존 실패 이벤트(input_required)로 끝난다.
+# ──────────────────────────────────────────────────────────────────────────
+
+# 단계별 사용자 안내 문구 — 프론트가 그대로 표시해도 되고 stage 로 직접 분기해도 된다.
+STAGE_LABELS = {
+    "extract": "입력 변환(음성·이미지 → 텍스트) 완료",
+    "input": "상담 문장 접수 완료",
+    "analyze": "동시 분석(안전 점검·왜곡 분류·자료 검색) 완료",
+    "route": "응답 방침 결정·프롬프트 구성 완료",
+    "generate": "상담 답변 생성 완료",
+    "speak": "음성 합성 완료",
+}
+
+
+def stage_plan(extracted: bool, tts: dict | None, crisis: bool = False) -> list[str]:
+    """이 요청이 거칠 단계 목록을 순서대로 만든다 — progress 의 seq/total 근거.
+
+    extracted: 이 게이트웨이 안에서 STT/OCR 변환을 거쳤는가 (진입 스트림이 True 로 넘김.
+               프론트가 전사문(stt.transcript)을 직접 보낸 경우는 변환이 없으므로 False).
+    crisis:    위기 분기 확정 후 True — generate(LLM) 단계가 계획에서 빠진다.
+    """
+    plan = (["extract"] if extracted else []) + ["input", "analyze", "route"]
+    if not crisis:
+        plan.append("generate")
+    if tts and tts.get("enabled"):
+        plan.append("speak")
+    return plan
+
+
+def progress_event(session_id: str, stage: str, plan: list[str]) -> dict:
+    """단계 하나가 '끝났다'는 신호 한 건을 만든다 (계획 안에서의 위치 포함)."""
+    return {"type": "progress", "session_id": session_id, "stage": stage,
+            "seq": plan.index(stage) + 1, "total": len(plan),
+            "label": STAGE_LABELS.get(stage, stage)}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -268,7 +325,12 @@ async def stt_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
     # STT 성공: 전사문을 반영한 컨텍스트로 바꾸고 일반 상담 흐름을 이어서 실행
     context = context.with_transcript(result)
     yield sse(stt_result_event(session_id, result))
-    async for event in respond_stream(context.text or "", session_id, context.input_meta, tts, llm):
+    # [progress] 1단계(extract) 완료 신고: 음성 → 텍스트 변환이 끝났다.
+    # 이후 단계(input~)는 respond_stream 이 이어서 신고한다 — extracted=True 를 넘겨
+    # 거기서도 같은 단계 계획(총 단계 수)으로 seq/total 을 계산하게 한다.
+    yield sse(progress_event(session_id, "extract", stage_plan(extracted=True, tts=tts)))
+    async for event in respond_stream(context.text or "", session_id, context.input_meta, tts, llm,
+                                      extracted=True):
         yield event  # respond_stream 이 내보내는 이벤트를 그대로 통과시킨다
 
 
@@ -313,7 +375,9 @@ async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
         ocr_meta["conversation"] = conversation  # kakao 프로파일: 대화 로그 보존
     stored_meta["ocr"] = ocr_meta
     yield sse(ocr_result_event(session_id, result))
-    async for event in respond_stream(user_text, session_id, stored_meta, tts, llm):
+    # [progress] 1단계(extract) 완료 신고: 이미지 → 텍스트(OCR) 변환이 끝났다 (STT 흐름과 대칭).
+    yield sse(progress_event(session_id, "extract", stage_plan(extracted=True, tts=tts)))
+    async for event in respond_stream(user_text, session_id, stored_meta, tts, llm, extracted=True):
         yield event
 
 
@@ -341,12 +405,21 @@ async def input_pending_stream(session_id=None, input_meta=None, tts=None):
 #   6. (옵션) 답변을 음성으로 합성 → 대화 기록 저장 → done
 # ══════════════════════════════════════════════════════════════════════════
 
-async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, llm=None):
+async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, llm=None,
+                         extracted: bool = False):
+    """상담 한 턴의 핵심 흐름. extracted=True 면 앞에서 STT/OCR 변환(extract 단계)을
+    이미 거쳤다는 뜻 — progress 신호의 단계 계획(seq/total)에 그 단계를 포함시킨다."""
     # 1) 세션 확보 + 최근 대화 로드 (LLM 이 맥락을 이어가도록 이전 발화들을 가져온다)
     session = await session_repository.ensure(session_id)
     session_id = session["session_id"]
     prior_messages = await session_repository.recent_llm_messages(session_id)
     input_meta = default_text_input_meta(input_meta)
+
+    # [progress] 이 요청이 거칠 단계 계획을 세운다 (위기 여부는 분석 전이라 아직 모름 —
+    # 평상시 기준. 위기로 확정되면 아래 4)에서 위기 경로 기준으로 다시 계산한다).
+    # "상담 문장 접수" 단계 완료: 텍스트가 확정됐고 대화방이 준비됐다.
+    plan = stage_plan(extracted, tts)
+    yield sse(progress_event(session_id, "input", plan))
 
     # 2) 세 가지 분석을 "동시에" 실행 — gather 는 병렬 실행 후 셋 다 끝나면 결과를 준다.
     #    순서대로 하면 3번 기다려야 할 것을 1번 기다리는 시간으로 줄이는 것.
@@ -355,6 +428,8 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
         services.classifier.classify_one(text),   # 인지왜곡 12분류 중 무엇인지
         services.retriever.retrieve(text),  # 관련 상담기법 자료 검색(RAG)
     )
+    # [progress] "동시 분석" 단계 완료: 세 결과가 모두 도착했다.
+    yield sse(progress_event(session_id, "analyze", plan))
     primary = cls["primary"]  # 대표 라벨 (예: "흑백 사고")
     # 대표 라벨의 확신 점수를 찾는다 (라벨 목록에서 primary 와 같은 항목의 score)
     confidence = max((l["score"] for l in cls["labels"] if l["label"] == primary), default=0.0)
@@ -372,6 +447,11 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     #    region 은 metadata.region(현행) → user_profiles(휴면) 순으로 resolve_region 이 정한다.
     #    user_id 배선(Entra oid→flow)은 다음 단계라 지금은 None → 프로필 경로 휴면.
     if policy.is_crisis:
+        # [progress] 위기 확정 — LLM 생성(generate) 단계가 빠진 위기 경로 계획으로
+        # 갱신하고 "방침 결정" 완료를 신고한다. (여기서부터 total 이 1 줄어드는 이유 —
+        # 프론트는 곧이어 오는 crisis 이벤트로 위기 화면으로 전환하므로 실용상 무해)
+        plan = stage_plan(extracted, tts, crisis=True)
+        yield sse(progress_event(session_id, "route", plan))
         region, district = respond_policy.resolve_region(input_meta, user_id=None)
         payload = await respond_policy.crisis_payload(
             reason=safety.get("reason"), region=region, district=district)
@@ -379,6 +459,8 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
         await session_repository.append_turn(session_id, crisis_turn(payload))
         if tts and tts.get("enabled"):
             yield sse(tts_event(session_id, await services.speech.synthesize_tts(payload.get("message", ""), tts)))
+            # [progress] "음성 합성" 단계 완료 (위기 안내문의 TTS).
+            yield sse(progress_event(session_id, "speak", plan))
         yield sse(done_event(session_id))
         return
 
@@ -390,11 +472,18 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     # 시스템 프롬프트(상담 스타일·라벨 지침) + 이전 대화 + 이번 발화 → LLM 입력 메시지
     messages = respond_policy.build_llm_messages(policy.prompt_strategy, primary, chunks,
                                                  prior_messages, text)
+    # [progress] "응답 방침 결정" 단계 완료: 정책 라우팅 + 프롬프트 구성까지 끝났다.
+    # 다음 이벤트부터 LLM 답변 조각(token)이 흘러온다 — 프론트는 여기서 로딩 표시를
+    # "답변 작성 중"으로 바꾸면 자연스럽다.
+    yield sse(progress_event(session_id, "route", plan))
     assistant_parts: list[str] = []
     # LLM 이 글자를 생성하는 대로 token 이벤트로 즉시 내보낸다 (타자 치듯 보이는 효과)
     async for tok in services.llm.chat_stream_async(messages, llm):
         assistant_parts.append(tok)
         yield sse(token_event(session_id, tok))
+    # [progress] "답변 생성" 단계 완료: 스트리밍이라 생성 = 전송이므로, 이 신호가
+    # 곧 "텍스트 송신 완료"이기도 하다 (별도 송신 단계를 두지 않는 이유).
+    yield sse(progress_event(session_id, "generate", plan))
 
     # 조각들을 합쳐 완성된 답변을 만들고, 어떤 정책·확신으로 생성했는지와 함께 저장
     # (confidence 를 남겨야 운영 후 "저확신 강등이 몇 번 일어났나"를 DB 에서 집계할 수 있다)
@@ -407,5 +496,7 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     # 6) (옵션) 음성 합성 — 문장이 완성된 뒤에 해야 자연스러워서 스트리밍이 끝난 후 수행
     if tts and tts.get("enabled"):
         yield sse(tts_event(session_id, await services.speech.synthesize_tts(assistant_text, tts)))
+        # [progress] "음성 합성" 단계 완료 — 마지막 단계라 이 직후 done 이 온다.
+        yield sse(progress_event(session_id, "speak", plan))
 
     yield sse(done_event(session_id))

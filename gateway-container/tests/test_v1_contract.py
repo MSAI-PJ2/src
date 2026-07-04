@@ -91,6 +91,17 @@ def types_of(events) -> list[str]:
     return [e["type"] for e in events]
 
 
+def progress_of(events) -> list[tuple]:
+    """progress 이벤트만 (stage, seq, total) 튜플로 추린다 — 단계 신호 계약 검증용."""
+    return [(e["stage"], e["seq"], e["total"]) for e in events if e["type"] == "progress"]
+
+
+# 평상시 텍스트 경로의 전체 이벤트 순서 (progress = 단계 완료 신호 4개):
+#   input → analyze → meta → chunks → route → token... → generate → done
+TEXT_SEQUENCE = (["progress", "progress", "meta", "chunks", "progress"]
+                 + ["token"] * len(LLM_TOKENS) + ["progress", "done"])
+
+
 def test_healthz(gateway):
     client, _ = gateway
     r = client.get("/healthz")
@@ -102,14 +113,15 @@ def test_respond_text_event_sequence(gateway):
     r = client.post("/v1/respond", json={"text": "사람들 앞에 서면 다 망칠 것 같아요"})
     assert r.status_code == 200
     events = sse_events(r)
-    assert types_of(events) == ["meta", "chunks"] + ["token"] * len(LLM_TOKENS) + ["done"]
+    assert types_of(events) == TEXT_SEQUENCE
 
-    meta = events[0]
+    meta = next(e for e in events if e["type"] == "meta")
     assert meta["primary"] == CLS_RESULT["primary"]
     assert meta["labels"] == CLS_RESULT["labels"]
     assert meta["turn_count"] >= 1
     assert meta["input"]["input_type"] == "text"
-    assert all(set(c) == {"id", "content"} for c in events[1]["chunks"])
+    chunks_ev = next(e for e in events if e["type"] == "chunks")
+    assert all(set(c) == {"id", "content"} for c in chunks_ev["chunks"])
     assert "".join(e["text"] for e in events if e["type"] == "token") == "".join(LLM_TOKENS)
     assert all(e["session_id"] == meta["session_id"] for e in events)
 
@@ -118,8 +130,9 @@ def test_respond_crisis_branch(gateway, monkeypatch):
     client, services = gateway
     monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
     events = sse_events(client.post("/v1/respond", json={"text": "더 살 이유가 없는 것 같아요"}))
-    assert types_of(events) == ["meta", "crisis", "done"]
-    crisis = events[1]
+    # 위기 경로: LLM 을 부르지 않으므로 generate 단계 신호가 없다 (route 까지만)
+    assert types_of(events) == ["progress", "progress", "meta", "progress", "crisis", "done"]
+    crisis = next(e for e in events if e["type"] == "crisis")
     assert crisis["blocked"] is True and crisis["message"]
     assert crisis["resources"] and all({"name", "phone"} <= set(r) for r in crisis["resources"])
 
@@ -139,7 +152,7 @@ def test_crisis_regional_hotlines(gateway, monkeypatch):
     events = sse_events(client.post("/v1/respond", json={
         "text": "더 살 이유가 없는 것 같아요",
         "metadata": {"region": "강원특별자치도"}}))
-    crisis = events[1]
+    crisis = next(e for e in events if e["type"] == "crisis")
     assert crisis["resources"][:1] == regional            # 지역 창구가 맨 앞
     assert crisis["resources"][1:] == policy.HOTLINES     # 전국 공통이 그 뒤
     assert calls == [("강원특별자치도", None)]              # 시도만, 시군구(껍데기)는 None
@@ -159,8 +172,8 @@ def test_crisis_lookup_failure_never_blocks(gateway, monkeypatch):
 
     events = sse_events(client.post("/v1/respond", json={
         "text": "더 살 이유가 없는 것 같아요", "metadata": {"region": "강원특별자치도"}}))
-    assert types_of(events) == ["meta", "crisis", "done"]
-    assert events[1]["resources"] == policy.HOTLINES
+    assert types_of(events) == ["progress", "progress", "meta", "progress", "crisis", "done"]
+    assert next(e for e in events if e["type"] == "crisis")["resources"] == policy.HOTLINES
 
 
 def test_crisis_no_region_skips_lookup(gateway, monkeypatch):
@@ -175,7 +188,7 @@ def test_crisis_no_region_skips_lookup(gateway, monkeypatch):
                         lambda r, d=None: calls.append((r, d)) or [])
 
     events = sse_events(client.post("/v1/respond", json={"text": "더 살 이유가 없는 것 같아요"}))
-    assert events[1]["resources"] == policy.HOTLINES
+    assert next(e for e in events if e["type"] == "crisis")["resources"] == policy.HOTLINES
     assert calls == []   # region 없음 → 조회 자체를 안 한다
 
 
@@ -216,7 +229,8 @@ def test_region_resolver_precedence(monkeypatch):
 def test_respond_transcript_path(gateway):
     client, _ = gateway
     events = sse_events(client.post("/v1/respond", json={"stt": {"transcript": "전사된 문장입니다"}}))
-    assert types_of(events) == ["meta", "chunks"] + ["token"] * len(LLM_TOKENS) + ["done"]
+    # 프론트가 전사문을 직접 보낸 경우: 게이트웨이 안에서 변환이 없으므로 extract 단계 없음
+    assert types_of(events) == TEXT_SEQUENCE
 
 
 def test_respond_audio_stt_success(gateway):
@@ -226,7 +240,8 @@ def test_respond_audio_stt_success(gateway):
     assert types_of(events)[:2] == ["stt", "stt"]
     assert events[0]["status"] == "processing"
     assert events[1]["status"] == "completed" and events[1]["transcript"]
-    assert types_of(events)[2:] == ["meta", "chunks"] + ["token"] * len(LLM_TOKENS) + ["done"]
+    # STT 성공 후: extract 완료 신호가 먼저, 이어서 텍스트 경로와 동일 (단계 수만 +1)
+    assert types_of(events)[2:] == ["progress"] + TEXT_SEQUENCE
 
 
 def test_respond_audio_stt_failure(gateway, monkeypatch):
@@ -248,9 +263,45 @@ def test_respond_no_input(gateway):
 def test_respond_tts_enabled(gateway):
     client, _ = gateway
     events = sse_events(client.post("/v1/respond", json={"text": "안녕하세요", "tts": {"enabled": True}}))
-    assert types_of(events) == ["meta", "chunks"] + ["token"] * len(LLM_TOKENS) + ["tts", "done"]
+    # TTS 켜면 마지막에 speak 단계가 추가된다: tts 이벤트 → speak 완료 신호 → done
+    assert types_of(events) == (["progress", "progress", "meta", "chunks", "progress"]
+                                + ["token"] * len(LLM_TOKENS)
+                                + ["progress", "tts", "progress", "done"])
     tts = next(e for e in events if e["type"] == "tts")
     assert tts["status"] == "completed" and tts["audio"]["kind"] == "base64"
+
+
+# ── progress(단계 완료 신호) 계약 — stage 이름·seq/total 이 문서(API_CONTRACT 7장)와 일치 ──
+
+def test_progress_stages_text_path(gateway):
+    """텍스트 입력(평상시): input→analyze→route→generate 4단계, total=4."""
+    client, _ = gateway
+    events = sse_events(client.post("/v1/respond", json={"text": "요즘 자꾸 실수해요"}))
+    assert progress_of(events) == [
+        ("input", 1, 4), ("analyze", 2, 4), ("route", 3, 4), ("generate", 4, 4)]
+    # 모든 progress 는 사람이 읽을 label 을 함께 싣는다 (프론트가 그대로 표시 가능)
+    assert all(e["label"] for e in events if e["type"] == "progress")
+
+
+def test_progress_stages_audio_and_tts(gateway):
+    """음성 입력 + TTS: extract 가 맨 앞, speak 가 맨 뒤 — 총 6단계."""
+    client, _ = gateway
+    events = sse_events(client.post("/v1/respond", json={
+        "audio": {"kind": "base64", "data": "QUJD"}, "tts": {"enabled": True}}))
+    assert progress_of(events) == [
+        ("extract", 1, 6), ("input", 2, 6), ("analyze", 3, 6),
+        ("route", 4, 6), ("generate", 5, 6), ("speak", 6, 6)]
+
+
+def test_progress_stages_crisis_path(gateway, monkeypatch):
+    """위기 경로: generate 단계가 계획에서 빠져 route 부터 total 이 3 으로 준다."""
+    client, services = gateway
+    monkeypatch.setattr(services, "safety", FakeSafety(safe=False))
+    events = sse_events(client.post("/v1/respond", json={"text": "더 살 이유가 없는 것 같아요"}))
+    assert progress_of(events) == [
+        ("input", 1, 4), ("analyze", 2, 4),   # 위기 확정 전 — 평상시 계획(4단계) 기준
+        ("route", 3, 3)]                       # 위기 확정 후 — generate 제외 계획으로 갱신
+    assert "generate" not in [s for s, _, _ in progress_of(events)]
 
 
 def test_api_key_required(gateway, monkeypatch):
