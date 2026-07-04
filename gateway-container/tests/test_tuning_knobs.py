@@ -1,18 +1,16 @@
-"""튜닝 노브(RERANK_BIAS_* / POLICY_MIN_CONFIDENCE) 동작 검증.
+"""튜닝 노브(POLICY_MIN_CONFIDENCE)와 RAG 선별(select_chunks) 동작 검증.
 
 기본값이 현행 동작과 동일한지(끄면 아무것도 안 바뀜), 그리고 각 노브가
-문서대로 동작하는지를 라우팅/재정렬 단위에서 고정한다.
+문서대로 동작하는지를 라우팅/선별 단위에서 고정한다.
+※ 라벨 가산점(rerank) 노브는 2026-07 제거 — 실코퍼스(82청크) 전수 분석에서
+  가산점이 참조하는 metadata.distortions 가 전부 비어 있어 죽은 코드로 확인.
+  선별(중복 제거 + top_n)은 select_chunks 로 남아 아래에서 특성을 고정한다.
 """
 import pytest
 
 from app import settings
 from app.respond import policy as context_policy
-from app.respond.flow import rerank
-
-CANDS = [
-    {"id": "d1", "content": "라벨 일치 문서", "score": 0.8, "metadata": {"distortions": ["흑백 사고"]}},
-    {"id": "d2", "content": "무관 문서", "score": 0.9, "metadata": {}},
-]
+from app.respond.flow import select_chunks
 
 
 def _cls(primary: str, score: float, selected: bool):
@@ -21,41 +19,29 @@ def _cls(primary: str, score: float, selected: bool):
                        {"label": "정상", "score": 0.01, "selected": False}]}
 
 
-def _bias_fired(result) -> bool:
-    # d1 은 raw 점수가 최저(0.8 < 0.9)라 정규화 후 0.0 — 가산점이 붙었을 때만 0 보다 커진다
-    return next(c for c in result if c["id"] == "d1")["score"] > 0.0
+# --- ① RAG 선별 (select_chunks) ---
+
+def test_select_chunks_orders_by_score_and_limits():
+    cands = [{"id": f"d{i}", "content": "c", "score": s}
+             for i, s in enumerate([0.2, 0.9, 0.5, 0.7, 0.1])]
+    result = select_chunks(cands, top_n=3)
+    assert [c["score"] for c in result] == [0.9, 0.7, 0.5]
 
 
-# --- ① rerank 가산점 노브 ---
-
-@pytest.mark.parametrize("source,score,selected,expected", [
-    ("score", 0.62, False, True),      # 현행: 확신 0.5 이상이면 발동
-    ("score", 0.07, True, False),      # 현행: sigmoid 저점수는 selected 여도 미발동
-    ("selected", 0.07, True, True),    # multi 권장: 서버 selected 판정으로 발동
-    ("selected", 0.62, False, False),  # selected 소스에서는 점수만으로 발동 안 함
-    ("either", 0.07, True, True),
-    ("either", 0.62, False, True),
-])
-def test_rerank_bias_source(monkeypatch, source, score, selected, expected):
-    monkeypatch.setattr(settings, "RERANK_BIAS_SOURCE", source)
-    cls = _cls("흑백 사고", score, selected)
-    result = rerank([dict(c) for c in CANDS], "흑백 사고", score, cls_labels=cls["labels"])
-    assert _bias_fired(result) is expected
-
-
-def test_rerank_bias_weight_knob(monkeypatch):
-    monkeypatch.setattr(settings, "RERANK_BIAS_WEIGHT", 0.9)
-    result = rerank([dict(c) for c in CANDS], "흑백 사고", 0.8,
-                    cls_labels=_cls("흑백 사고", 0.8, True)["labels"])
+def test_select_chunks_dedups_keeping_higher_score():
+    cands = [{"id": "d1", "content": "old", "score": 0.4},
+             {"id": "d1", "content": "new", "score": 0.8},
+             {"id": "d2", "content": "c", "score": 0.6}]
+    result = select_chunks(cands, top_n=4)
     d1 = next(c for c in result if c["id"] == "d1")
-    assert d1["score"] == pytest.approx(0.9)  # 정규화 0.0 + 가산점(WEIGHT) 0.9
+    assert d1["score"] == 0.8 and len(result) == 2
 
 
-def test_rerank_normal_label_never_biased(monkeypatch):
-    monkeypatch.setattr(settings, "RERANK_BIAS_SOURCE", "either")
-    result = rerank([dict(c) for c in CANDS], "정상", 0.99,
-                    cls_labels=_cls("정상", 0.99, True)["labels"])
-    assert not _bias_fired(result)
+def test_select_chunks_empty_and_default_top_n(monkeypatch):
+    assert select_chunks([]) == []
+    monkeypatch.setattr(settings, "RAG_TOP_N", 2)
+    cands = [{"id": f"d{i}", "content": "c", "score": i / 10} for i in range(5)]
+    assert len(select_chunks(cands)) == 2  # top_n 생략 시 settings.RAG_TOP_N
 
 
 # --- ③ 저확신 강등 노브 ---
