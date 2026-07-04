@@ -5,7 +5,7 @@
 구획 목차 (Ctrl+F 로 "[구획" 검색):
     [구획 1] SSE 이벤트     프론트로 내보내는 메시지 조각들의 형식 (API_CONTRACT 와 1:1)
     [구획 2] 요청 정리      "텍스트/음성/이미지 중 뭐가 왔나" 판단 (RespondRequestContext)
-    [구획 3] RAG 재정렬     검색 결과를 프롬프트에 넣을 순서로 다듬기 (+ 튜닝 노브)
+    [구획 3] RAG 선별       검색 결과 중복 제거 후 상위 top_n 개만 고르기
     [구획 4] 진입 스트림    stt(음성)/ocr(이미지)/입력없음 — 성공하면 [구획 5]로 합류
     [구획 5] respond_stream 핵심 6단계: 세션→병렬분석→정책→(위기)→LLM 스트리밍→저장
 
@@ -212,63 +212,33 @@ def default_text_input_meta(input_meta: dict[str, Any] | None = None) -> dict[st
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# [구획 3] RAG 재정렬 — 검색 결과를 "프롬프트에 넣을 순서"로 다듬기
+# [구획 3] RAG 선별 — 검색 결과에서 "프롬프트에 넣을 만큼"만 고른다
 #
-# 하는 일 3가지:
-#   1. 점수 정규화 — 검색 점수를 0~1 범위로 (검색엔진마다 점수 크기가 달라서)
-#   2. 라벨 가산점 — 이번 발화의 인지왜곡 라벨과 관련된 기법 문서에 +RERANK_BIAS_WEIGHT
-#   3. 중복 제거 후 상위 top_n 개만 반환
-# 가산점 발동 조건은 환경변수 노브로 조정 (settings.py 의 RERANK_BIAS_* 참고):
-#   score(확신 점수, 기본) | selected | either
-#   ※ cogdist v2 부터 primary 는 항상 selected=true — selected 소스는 왜곡 발화에
-#     무조건 발동하므로 신뢰도 게이트가 필요하면 score 소스(+0.55)를 쓴다
+# 하는 일 2가지:
+#   1. 중복 제거 — 같은 id 문서가 여러 번 오면 점수 높은 쪽만 남긴다
+#   2. 점수 내림차순 상위 top_n 개만 반환 (순서 = 검색엔진 점수 그대로)
+#
+# ※ 과거에는 여기에 "라벨 일치 문서 가산점"(rerank)이 있었다 — 2026-07 제거.
+#   근거: 실제 RAG 코퍼스(82청크) 전수 분석 결과 가산점이 참조하는 라벨 필드
+#   (metadata.distortions)가 전 청크에서 비어 있어 한 번도 발동할 수 없었고(죽은
+#   코드), 코퍼스의 분류축(해석편향·정신화·DBT/MI 등)이 분류기 12라벨과 달라
+#   태깅 투자 가치도 낮았다. 라벨→기법 연결은 프롬프트(policy.py [구획 2]
+#   LABEL_GUIDANCE)가 담당한다 — 검색은 발화 내용만으로 충분하다.
 # ══════════════════════════════════════════════════════════════════════════
 
-def _bias_eligible(primary: str, confidence: float, cls_labels: list[dict] | None) -> bool:
-    """이번 턴에 라벨 가산점을 줄 수 있는 상태인지 판정한다."""
-    if primary in ("정상", "불충분"):
-        return False
-    by_score = confidence >= settings.RERANK_BIAS_MIN_CONFIDENCE
-    by_selected = any(l.get("label") == primary and l.get("selected")
-                      for l in (cls_labels or []))
-    source = settings.RERANK_BIAS_SOURCE
-    if source == "selected":
-        return by_selected
-    if source == "either":
-        return by_score or by_selected
-    return by_score  # 기본: score (현행 동작)
-
-
-def rerank(candidates: list[dict], primary: str, confidence: float,
-           top_n: int | None = None, cls_labels: list[dict] | None = None) -> list[dict]:
-    top_n = top_n or settings.RERANK_TOP_N
+def select_chunks(candidates: list[dict], top_n: int | None = None) -> list[dict]:
+    """검색 후보를 중복 제거하고 점수 상위 top_n 개만 돌려준다."""
+    top_n = top_n or settings.RAG_TOP_N
     if not candidates:
         return []
-
-    # 1) 정규화 준비: 최고점과 최저점 사이의 폭(span)을 구한다
-    scores = [float(c.get("score", 0.0)) for c in candidates]
-    min_score, max_score = min(scores), max(scores)
-    span = max_score - min_score
-
-    # 2) 가산점 발동 여부 (조건은 위 _bias_eligible — 환경변수로 조정)
-    use_bias = _bias_eligible(primary, confidence, cls_labels)
     deduped: dict[str, dict] = {}
-
     for candidate in candidates:
-        raw = float(candidate.get("score", 0.0))
-        normalized = 1.0 if span == 0 else (raw - min_score) / span
-        # 문서의 metadata.distortions = 이 문서(상담 기법)가 다루는 왜곡 라벨 목록
-        distortions = candidate.get("metadata", {}).get("distortions", [])
-        final = normalized + (settings.RERANK_BIAS_WEIGHT
-                              if use_bias and primary in distortions else 0.0)
-        ranked = {**candidate, "score": final}
-        cid = ranked.get("id")
+        cid = candidate.get("id")
+        score = float(candidate.get("score", 0.0))
         # 같은 id 문서가 여러 번 오면 점수가 높은 쪽만 남긴다
-        if cid not in deduped or final > deduped[cid]["score"]:
-            deduped[cid] = ranked
-
-    # 3) 점수 내림차순 정렬 후 상위 top_n 개
-    return sorted(deduped.values(), key=lambda c: c["score"], reverse=True)[:top_n]
+        if cid not in deduped or score > float(deduped[cid].get("score", 0.0)):
+            deduped[cid] = candidate
+    return sorted(deduped.values(), key=lambda c: float(c.get("score", 0.0)), reverse=True)[:top_n]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -412,11 +382,9 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
         yield sse(done_event(session_id))
         return
 
-    # 5) 참고자료 정렬([구획 3]) → 프롬프트 구성(policy [구획 2]) → LLM 스트리밍
+    # 5) 참고자료 선별([구획 3]) → 프롬프트 구성(policy [구획 2]) → LLM 스트리밍
     #    정책이 RAG 를 끄면(chunks=[]) 참고자료 없이 답변한다
-    #    cls_labels: multi_label 모델의 selected 판정을 가산점 조건으로 쓸 수 있게 전달
-    chunks = rerank(cands, primary, confidence, top_n=policy.rag_top_n,
-                    cls_labels=cls["labels"]) if policy.use_rag else []
+    chunks = select_chunks(cands, top_n=policy.rag_top_n) if policy.use_rag else []
     yield sse(chunks_event(session_id, chunks))
 
     # 시스템 프롬프트(상담 스타일·라벨 지침) + 이전 대화 + 이번 발화 → LLM 입력 메시지

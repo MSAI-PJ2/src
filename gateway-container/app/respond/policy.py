@@ -36,7 +36,7 @@ class ContextPolicy:
     name: str                     # 정책 이름 — 어떤 정책이 적용됐는지 세션 기록에 남는다
     prompt_strategy: str          # 구획 2 의 어떤 프롬프트 전략을 쓸지
     use_rag: bool = True          # 검색된 참고자료를 프롬프트에 넣을지
-    rag_top_n: int | None = None  # 참고자료 개수 (None = settings.RERANK_TOP_N, 기본 4)
+    rag_top_n: int | None = None  # 참고자료 개수 (None = settings.RAG_TOP_N, 기본 4)
     is_crisis: bool = False       # True 면 LLM 을 부르지 않고 고정 위기 메시지 출력
 
     def as_metadata(self) -> dict:
