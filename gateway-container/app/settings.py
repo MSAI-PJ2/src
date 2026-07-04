@@ -40,14 +40,13 @@ CONTENT_SAFETY_ENABLED = _bool("CONTENT_SAFETY_ENABLED", False)
 CONTENT_SAFETY_ENDPOINT = os.getenv("CONTENT_SAFETY_ENDPOINT", "")
 CONTENT_SAFETY_KEY = os.getenv("CONTENT_SAFETY_KEY", "")
 # 위험 점수(severity)가 이 값 이상이면 차단. Azure 기준 0/2/4/6 단계 (0=안전, 2=mild, 4=medium, 6=high)
-#   2 → 4 상향 (2026-07 실험 브랜치): threshold 2 는 자해 언급이 없는 강한 자기비하까지
-#   위기로 오차단했다 — 2026-07-04 턴제 실험에서 낙인찍기 시나리오 5턴 중 4턴이 차단되어
-#   정작 CBT 상담이 가장 필요한 사용자가 핫라인 카드만 받는 문제 확인(보고서 발견 1).
-#   4 = medium 이상만 차단. 명시적 위기 문장이 새어 나가지 않는지(미차단 0건)
-#   scripts/safety_threshold_probe.py 로 검증한 뒤 팀 논의로 확정한다.
-#   주의: 배포(ACA) 환경변수에 CONTENT_SAFETY_THRESHOLD 가 설정돼 있으면 그 값이
-#   이 기본값보다 우선한다 — 브랜치 테스트 배포 시 env 를 지우거나 4 로 맞출 것.
-CONTENT_SAFETY_THRESHOLD = int(os.getenv("CONTENT_SAFETY_THRESHOLD", "4"))
+#   ⚠ 4 상향은 실측으로 기각됨 (2026-07-04, gateway_safety_sweep 실험): Azure 는
+#   의도·계획 없는 자살사고 표현("죽고 싶다는 생각이 며칠째…")을 severity 2 로 매기므로,
+#   4 로 올리면 자살사고가 차단 없이 일반 상담으로 흘러간다. 2 유지가 안전 하한선.
+#   threshold 2 의 과차단(강한 자기비하 오차단) 문제는 임계값이 아니라 소프트 모드
+#   (severity 2~3 = 상담 진행 + 핫라인 병기) 설계로 풀어야 한다 — 팀 논의 보류 중.
+#   실측 도구: scripts/safety_threshold_probe.py
+CONTENT_SAFETY_THRESHOLD = int(os.getenv("CONTENT_SAFETY_THRESHOLD", "2"))
 CONTENT_SAFETY_TIMEOUT = float(os.getenv("CONTENT_SAFETY_TIMEOUT", "5"))
 
 # --- RAG: 검색된 참고자료 중 프롬프트에 넣을 문서 개수 ---
