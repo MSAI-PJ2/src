@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from test_v1_contract import (  # 기존 가짜 어댑터·헬퍼 재사용
-    LLM_TOKENS, FakeClassifier, FakeLlm, FakeRetriever, FakeSafety, FakeSpeech,
+    LLM_TOKENS, TEXT_SEQUENCE, FakeClassifier, FakeLlm, FakeRetriever, FakeSafety, FakeSpeech,
     sse_events, types_of,
 )
 
@@ -74,9 +74,10 @@ def test_kakao_profile_event_sequence(gateway):
     assert events[1]["profile"] == "kakao"
     assert events[1]["conversation"] == CONVERSATION
     assert events[1]["user_text"] == KAKAO_USER_TEXT
-    assert types_of(events)[2:] == ["meta", "chunks"] + ["token"] * len(LLM_TOKENS) + ["done"]
+    # OCR 성공 후: extract 완료 신호(progress)가 먼저, 이어서 텍스트 경로와 동일
+    assert types_of(events)[2:] == ["progress"] + TEXT_SEQUENCE
 
-    meta = events[2]
+    meta = next(e for e in events if e["type"] == "meta")
     assert meta["input"]["input_type"] == "image"
     assert "data" not in (meta["input"]["image"] or {})   # 원본 base64 는 저장/노출 금지
     assert meta["input"]["ocr"]["profile"] == "kakao"
@@ -95,8 +96,8 @@ def test_generic_profile_event_sequence(gateway):
     assert types_of(events)[:2] == ["ocr", "ocr"]
     assert events[1]["profile"] == "generic"
     assert events[1]["user_text"] == GENERIC_TEXT
-    assert types_of(events)[2:] == ["meta", "chunks"] + ["token"] * len(LLM_TOKENS) + ["done"]
-    meta = events[2]
+    assert types_of(events)[2:] == ["progress"] + TEXT_SEQUENCE
+    meta = next(e for e in events if e["type"] == "meta")
     assert meta["input"]["ocr"]["profile"] == "generic"
     assert "conversation" not in meta["input"]["ocr"]     # generic 은 대화 로그 없음
     assert fake_doc.calls[0]["profile"] == "generic"
@@ -135,7 +136,7 @@ def test_text_still_wins_over_image(gateway):
     """text 가 함께 오면 OCR 을 건너뛰고 일반 텍스트 상담으로 처리한다."""
     client, _, fake_doc = gateway
     events = sse_events(client.post("/v1/respond", json={**KAKAO_BODY, "text": "직접 쓴 발화"}))
-    assert types_of(events) == ["meta", "chunks"] + ["token"] * len(LLM_TOKENS) + ["done"]
+    assert types_of(events) == TEXT_SEQUENCE   # OCR 건너뜀 = extract 단계도 없음
     assert fake_doc.calls == []
 
 

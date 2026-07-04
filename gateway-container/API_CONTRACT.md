@@ -1,6 +1,6 @@
 # API Gateway API 계약서
 
-이 문서는 Azure Container Apps `api-gateway`의 API/SSE 계약 정리본이다. 2026-07-02 기준. 게이트웨이 평탄화 구조와 cogdist v2(ml/cogdist-server) 계약을 반영한다.
+이 문서는 Azure Container Apps `api-gateway`의 API/SSE 계약 정리본이다. 2026-07-04 기준. 게이트웨이 평탄화 구조, cogdist v2(ml/cogdist-server) 계약, 단계 진행 신호(progress)를 반영한다.
 
 ## 1. 기준 상태
 
@@ -236,6 +236,8 @@ Content-Type: text/event-stream; charset=utf-8
 SSE 형식:
 
 ```text
+data: {"type":"progress", ...}   # 단계 완료 신호 (아래 '단계 진행 신호' 참고)
+
 data: {"type":"meta", ...}
 
 data: {"type":"chunks", ...}
@@ -252,6 +254,34 @@ type: 이벤트 종류. 프론트엔드는 type 기준으로 분기한다.
 session_id: 같은 대화 흐름을 묶는 세션 식별자.
 done: 스트림 종료 이벤트. done 전까지 연결을 유지한다.
 crisis: safety barrier에 의해 일반 LLM 응답 대신 반환된다.
+progress: 파이프라인 단계가 하나 끝날 때마다 오는 완료 신호. 모르는 type 은
+          무시해도 동작에 지장이 없다 (progress 를 안 쓰는 프론트도 안전).
+```
+
+### 단계 진행 신호 (progress)
+
+프론트가 로딩 UI(체크리스트/진행바)를 그릴 수 있도록, 각 단계가 **끝날 때마다** 한 건씩 온다.
+
+```json
+{"type":"progress","session_id":"...","stage":"analyze","seq":2,"total":4,
+ "label":"동시 분석(안전 점검·왜곡 분류·자료 검색) 완료"}
+```
+
+| stage | 뜻 (완료 시점) | 언제 있나 |
+|---|---|---|
+| extract | 입력 변환: 음성(STT)·이미지(OCR) → 텍스트 | audio/image 입력일 때만 |
+| input | 상담 문장 접수: 텍스트 확정 + 세션 준비 | 항상 |
+| analyze | 동시 분석: 안전 점검+왜곡 분류+자료 검색 완료 | 항상 |
+| route | 응답 방침 결정 + (평상시) 프롬프트 구성 완료 | 항상 |
+| generate | LLM 답변 생성 종료. 스트리밍이라 생성=송신이므로 이 신호가 곧 텍스트 송신 완료 | 평상시만 (위기 분기엔 없음) |
+| speak | 음성 합성(TTS) 완료 | tts.enabled=true 일 때만 |
+
+```text
+seq/total: 이 요청이 거칠 전체 단계 중 몇 번째가 끝났는지 (진행바용).
+label:     사람이 읽는 안내 문구 — 그대로 표시해도 되고 stage 로 직접 분기해도 된다.
+위기 분기:  분석 후 위기로 확정되면 generate 단계가 계획에서 빠지므로 route 이벤트부터
+           total 이 1 줄어든다. 프론트는 곧이어 오는 crisis 이벤트로 화면을 전환하면 된다.
+실패 경로:  STT/OCR 실패·입력 없음은 진행할 단계가 없어 progress 없이 input_required 로 끝난다.
 ```
 
 ## 8. Respond - LLM 생성 길이 제어
@@ -299,7 +329,8 @@ crisis 분기에서는 일반 LLM 생성이 차단되므로 이 옵션이 적용
 정상 이벤트 순서:
 
 ```text
-meta -> chunks -> token... -> done
+progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
+  -> token... -> progress(generate) -> done
 ```
 
 `meta` 예시:
@@ -337,7 +368,8 @@ meta -> chunks -> token... -> done
 정상 이벤트 순서:
 
 ```text
-meta -> chunks -> token... -> done
+progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
+  -> token... -> progress(generate) -> done
 ```
 
 `meta.input.stt.transcript`에 정규화된 transcript가 포함된다.
@@ -366,7 +398,9 @@ meta -> chunks -> token... -> done
 STT 성공 이벤트 순서:
 
 ```text
-stt(processing) -> stt(completed) -> meta -> chunks -> token... -> done
+stt(processing) -> stt(completed) -> progress(extract)
+  -> progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
+  -> token... -> progress(generate) -> done
 ```
 
 STT 실패 이벤트 순서:
@@ -415,7 +449,8 @@ stt(processing) -> stt(error|no_match) -> input_required -> done
 이벤트 순서:
 
 ```text
-meta -> chunks -> token... -> tts -> done
+progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
+  -> token... -> progress(generate) -> tts -> progress(speak) -> done
 ```
 
 `tts` 이벤트 예시:
@@ -449,8 +484,10 @@ mime_type = event.get("audio", {}).get("mime_type") or event.get("mime_type")
 이벤트 순서:
 
 ```text
-meta -> crisis -> done
+progress(input) -> progress(analyze) -> meta -> progress(route, total 축소) -> crisis -> done
 ```
+
+(위기 경로는 LLM 생성이 없어 generate 단계가 계획에서 빠진다 — 7장 '단계 진행 신호' 참고)
 
 응답 예시:
 
@@ -747,7 +784,9 @@ DOCINTEL_KEY=<set-in-azure-secret-or-local-env>
 이벤트 순서:
 
 ```text
-성공:  ocr(processing) -> ocr(completed, profile·user_text[·conversation] 포함) -> meta -> chunks -> token... -> done
+성공:  ocr(processing) -> ocr(completed, profile·user_text[·conversation] 포함) -> progress(extract)
+       -> progress(input) -> progress(analyze) -> meta -> chunks -> progress(route)
+       -> token... -> progress(generate) -> done
 실패:  ocr(processing) -> ocr(error | no_user_messages(kakao) | no_text_found(generic)) -> input_required -> done
 ```
 
@@ -800,7 +839,10 @@ for raw in resp.iter_lines(decode_unicode=True):
     event = json.loads(raw[6:])
     typ = event.get("type")
 
-    if typ == "stt":
+    if typ == "progress":
+        # 단계 완료 신호 — 로딩 UI 갱신 (예: "2/4 · 동시 분석 완료")
+        loading = f"{event['seq']}/{event['total']} · {event['label']}"
+    elif typ == "stt":
         stt_status = event.get("status")
         transcript = event.get("transcript")
         stt_error = event.get("error") or event.get("reason")
