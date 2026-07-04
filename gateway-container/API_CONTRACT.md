@@ -886,3 +886,72 @@ answer = "".join(answer_parts)
 11. max_completion_tokens 128/4096 비교 -> 응답 길이 제어 확인
 12. Document Intelligence 구현 후 document processing/completed/meta/chunks/token/done 확인
 ```
+
+## 21. 프로필 & 가구현 로그인 (가상 ID)
+
+정식 로그인(Entra) 전까지 쓰는 임시 사용자 식별 방식과, 그 위에 얹힌 프로필/설문 API.
+
+### 가상 ID 규칙 (x-user-id 헤더)
+
+```text
+- 프론트엔드가 가상 ID(UUID 권장)를 "발급·보관"하고 매 요청 x-user-id 헤더로 보낸다.
+- 헤더가 있으면 그 값이 user_id — 프로필/설문/위기 지역 안내가 사용자별로 동작한다.
+- 헤더가 없으면 user_id = "anonymous" (하위 호환). 가구현 단일 사용자 데모에서는
+  anonymous 로도 전 기능이 동작하지만, anonymous 는 전 사용자 공유 계정이므로
+  다중 사용자 시연부터는 화면에서 반드시 헤더를 보낼 것.
+- 허용 형식: A-Z a-z 0-9 _ . -  (최대 64자). 위반 시 400.
+- AUTH_MODE=entra 로 전환하면 이 헤더는 무시되고 JWT 의 oid 가 user_id 가 된다
+  → 프론트는 헤더 발급 로직을 로그인 토큰으로 바꾸기만 하면 됨 (서버 계약 동일).
+⚠️ 가상 ID 는 식별이지 인증이 아니다 — ID 를 아는 사람은 해당 프로필을 읽을 수 있다.
+```
+
+프론트 적용 예 (app 레포 api_client.py):
+
+```python
+import uuid, streamlit as st
+
+def _headers():
+    if "virtual_user_id" not in st.session_state:
+        st.session_state.virtual_user_id = str(uuid.uuid4())
+    return {"x-user-id": st.session_state.virtual_user_id}
+
+# requests.get(f"{BACKEND_URL}/v1/profile", headers=_headers(), timeout=15) 처럼 사용
+```
+
+### GET /v1/profile — 내 프로필 조회
+
+```text
+200: 프로필 JSON  |  404: 아직 없음 (프론트는 404 를 받으면 POST 로 생성)
+```
+
+### POST /v1/profile — 프로필 생성 (멱등)
+
+```json
+{"user_id":"<가상ID>", "survey_completed": false,
+ "created_at":"...", "updated_at":"..."}
+```
+
+### POST /v1/profile/survey — 설문 저장
+
+요청 (설문 페이지 payload 그대로 — 필드는 느슨하게 수용):
+
+```json
+{
+  "nickname": "...",
+  "location": {"sido": "부산광역시", "sigungu": "해운대구"},
+  "emergency_contact": {"name": "...", "phone": "...", "consent_to_show": true},
+  "survey": {"prior_counseling": "...", "...": "..."},
+  "privacy": {"agreed_terms": true, "agreed_sensitive_profile": true, "allow_location_use": true}
+}
+```
+
+응답: 저장된 프로필 전체 + `survey_completed: true`.
+
+```text
+서버가 해석하는 값은 location.sido/sigungu 뿐이다 (실 등록 문서 스키마 그대로 저장) —
+이후 위기 발화 시 metadata.region 없이도 프로필 지역으로 가까운 상담 창구를 안내한다
+(우선순위: metadata.region > 프로필). 가구현 단계에서는 이미 등록된 ID 면 anonymous 포함
+어떤 ID 든 동작한다. 나머지 필드는 보관만 하므로 프론트가 자유롭게 확장해도 서버 수정이
+필요 없다. 저장 위치: SESSION_REPOSITORY=memory 면 서버 메모리(개발), cosmos 면
+user_profiles 컨테이너(문서 id=user_id, 파티션 키 /user_id).
+```

@@ -9,6 +9,7 @@
 서버가 다른 요청을 처리할 수 있게 해 준다. await = "결과가 올 때까지 이 요청만 대기".
 """
 import asyncio
+import re
 from typing import Any, Literal
 
 import httpx
@@ -17,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import settings
+from ..profile import profile_repository
 from ..respond import flow
 from ..respond.flow import RespondRequestContext
 from ..services import services
@@ -136,6 +138,20 @@ class SessionCreateIn(BaseModel):
     session_id: str | None = None
 
 
+class SurveyIn(BaseModel):
+    """POST /v1/profile/survey 의 입력 — 프론트 설문 페이지의 payload 와 1:1.
+
+    세부 항목은 아직 프론트가 다듬는 중이라 dict 로 느슨하게 받는다 (필드가 늘어도
+    서버 수정 없이 그대로 저장). 서버가 실제로 "해석"하는 값은 location.sido/sigungu
+    하나뿐이며(위기 지역 안내용 — profile.py 의 한글 미러 참고) 나머지는 보관만 한다.
+    """
+    nickname: str | None = None
+    location: dict[str, Any] | None = None           # {"sido": 시도, "sigungu": 시군구|null}
+    emergency_contact: dict[str, Any] | None = None  # 비상 연락처 (동의 플래그 포함)
+    survey: dict[str, Any] | None = None             # 사전 설문 문항 응답들
+    privacy: dict[str, Any] | None = None            # 약관/민감정보/위치 동의 플래그들
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # [구획 2] 인증 — "이 요청을 처리해도 되는가"
 #
@@ -212,22 +228,45 @@ def _bearer_token(authorization: str | None) -> str:
     return authorization.split(" ", 1)[1].strip()
 
 
-async def current_user(authorization: str | None = Header(default=None)) -> str:
-    """요청한 사용자의 user_id 를 반환. api_key 모드에서는 로그인이 없어 "anonymous".
+# 가상 ID(x-user-id) 허용 형식: 영문/숫자/일부 기호, 최대 64자.
+# UUID 가 대표 사용처지만 형식을 UUID 로 못박지는 않는다 (테스트용 짧은 ID 허용).
+_VIRTUAL_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 
-    entra 모드: Authorization: Bearer <JWT> 를 검증해 user_id(oid) 를 돌려준다.
+
+async def current_user(authorization: str | None = Header(default=None),
+                       x_user_id: str | None = Header(default=None)) -> str:
+    """요청한 사용자의 user_id 를 반환.
+
+    ── 가구현 로그인 (api_key 모드, 현행) ─────────────────────────────────
+    정식 로그인 전까지는 프론트엔드가 "가상 ID"를 발급·보관하고 매 요청의
+    x-user-id 헤더로 보낸다 (프론트: UUID 를 만들어 세션/저장소에 저장 후 재사용).
+    - 헤더가 있으면 그 값이 곧 user_id — 프로필/설문/위기 지역 안내가 사용자별로 동작.
+    - 헤더가 없으면 기존과 동일하게 "anonymous" (하위 호환 — 이전 프론트도 그대로 동작).
+    - 형식이 틀리면 400 으로 명확히 거절한다 (조용히 anonymous 로 강등하면 프로필이
+      엉뚱한 계정에 저장되는 사고를 늦게 발견하게 되므로).
+    ⚠️ 가상 ID 는 "식별"이지 "인증"이 아니다 — 헤더를 아는 사람은 그 프로필을 읽을 수
+    있다. 민감정보 보호가 필요해지는 시점에 아래 entra 모드로 전환한다.
+
+    ── entra 모드 (정식 로그인, 구현 완료·잠들어 있음) ─────────────────────
+    Authorization: Bearer <JWT> 를 검증해 user_id(oid) 를 돌려준다. 이때 x-user-id
+    헤더는 무시된다 — 같은 자리(user_id)에 가상 ID 대신 실제 oid 가 꽂히므로,
+    프로필·세션·지역 안내 코드는 한 줄도 바꾸지 않고 정식 로그인으로 전환된다.
     검증(서명·issuer·audience·만료)은 블로킹이라 to_thread 로 오프로딩한다.
 
     ── [남은 작업 — 세션을 user_id 로 스코프] ──────────────────────────────
-    인증 게이트(유효 토큰 없으면 접근 차단)는 이 함수로 이미 완성이다. 여기에 더해
-    "내 세션만 접근"까지 원하면: [구획 3]의 respond/sessions 라우트에서
-    user_id: str = Depends(current_user) 로 값을 받아 흐름·세션 저장/조회 조건에
-    포함하면 된다 (session.py 의 저장소가 user_id 필드를 받도록 확장 — 데이터 모델
-    변경이라 기존 익명 세션과의 호환을 정하고 진행).
+    프로필(/v1/profile*)과 위기 지역 안내는 user_id 배선이 끝났다. 세션까지
+    "내 세션만 접근"을 원하면: sessions 라우트에서 이 값을 받아 session.py 저장소가
+    user_id 필드를 갖도록 확장한다 (데이터 모델 변경이라 기존 익명 세션과의 호환을
+    정하고 진행).
     ─────────────────────────────────────────────────────────────────────
     """
     if settings.AUTH_MODE != "entra":
-        return "anonymous"
+        virtual_id = (x_user_id or "").strip()
+        if not virtual_id:
+            return "anonymous"
+        if not _VIRTUAL_ID_RE.match(virtual_id):
+            raise HTTPException(400, "invalid x-user-id (allowed: A-Z a-z 0-9 _ . - , max 64)")
+        return virtual_id
 
     token = _bearer_token(authorization)  # 없으면 401
     try:
@@ -271,32 +310,65 @@ async def batch_classify(body: BatchClassifyIn):
 
 
 @v1.post("/respond")
-async def respond(body: RespondIn):
+async def respond(body: RespondIn, user_id: str = Depends(current_user)):
     """상담 응답 생성 — 이 서비스의 핵심 주소.
 
     입력 형태(이미지/음성/텍스트/빈 입력)에 따라 네 가지 흐름 중 하나로 보낸다.
     응답은 한 번에 주지 않고 SSE 스트리밍(생성되는 대로 조각조각 전송)으로 보낸다
     — 그래서 반환값이 일반 JSON 이 아니라 StreamingResponse 다.
+
+    user_id: 위기 분기에서 프로필(설문에 저장된 지역)로 지역 핫라인을 찾을 때 쓴다.
+    metadata.region 이 오면 그쪽이 우선 (respond/policy.py resolve_region 참고).
     """
     context = RespondRequestContext.from_body(body)  # 요청을 내부 형태로 정리
 
     if context.requires_ocr:
         # 채팅 캡쳐 이미지만 왔음 → OCR(Document Intelligence) 후 상담 흐름으로
         stream = flow.ocr_then_respond_stream(
-            context.session_id, context.input_meta, context.tts, context.llm)
+            context.session_id, context.input_meta, context.tts, context.llm, user_id=user_id)
     elif context.requires_stt:
         # 오디오만 왔음 → 먼저 음성→텍스트(STT) 변환 후 상담 흐름으로
         stream = flow.stt_then_respond_stream(
-            context.session_id, context.input_meta, context.tts, context.llm)
+            context.session_id, context.input_meta, context.tts, context.llm, user_id=user_id)
     elif not context.has_text:
-        # 텍스트도 오디오도 없음 → "입력을 보내달라"는 안내만 반환
+        # 텍스트도 오디오도 없음 → "입력을 보내달라"는 안내만 반환 (위기 분기 없음 → user_id 불필요)
         stream = flow.input_pending_stream(context.session_id, context.input_meta, context.tts)
     else:
         # 일반 텍스트 상담
         stream = flow.respond_stream(
-            context.text or "", context.session_id, context.input_meta, context.tts, context.llm)
+            context.text or "", context.session_id, context.input_meta, context.tts, context.llm,
+            user_id=user_id)
 
     return StreamingResponse(stream, media_type="text/event-stream")
+
+
+# ── 프로필 (가구현 로그인과 짝) — 저장 규칙은 app/profile.py, 가상 ID 는 [구획 2] 참고 ──
+
+@v1.get("/profile")
+async def get_profile(user_id: str = Depends(current_user)):
+    """내(x-user-id) 프로필 조회. 없으면 404 — 프론트 로그인 페이지는 404 를 받으면
+    POST /v1/profile 로 새로 만든다 (get_profile() or create_profile() 패턴)."""
+    prof = await asyncio.to_thread(profile_repository.get, user_id)
+    if prof is None:
+        raise HTTPException(404, "profile not found")
+    return prof
+
+
+@v1.post("/profile")
+async def create_profile(user_id: str = Depends(current_user)):
+    """프로필 생성. 이미 있으면 그대로 반환 (여러 번 눌러도 안전 — 멱등)."""
+    return await asyncio.to_thread(profile_repository.ensure, user_id)
+
+
+@v1.post("/profile/survey")
+async def submit_survey(body: SurveyIn, user_id: str = Depends(current_user)):
+    """설문 저장 → survey_completed=True 로 완료 표시된 프로필을 돌려준다.
+
+    location.sido/sigungu 는 한글 필드(시도/시군구)로 미러 저장되어, 이후 위기 발화 시
+    metadata.region 없이도 프로필 지역으로 가까운 상담 창구를 안내한다.
+    """
+    payload = body.model_dump(exclude_none=True)
+    return await asyncio.to_thread(profile_repository.save_survey, user_id, payload)
 
 
 @v1.post("/sessions")

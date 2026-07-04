@@ -27,6 +27,7 @@ gateway-container/
     |-- main.py            앱 생성 + 미들웨어 + 라우터 등록
     |-- settings.py        환경변수 (모든 조정값)
     |-- session.py         세션 — 저장소 규격 + memory/Cosmos 구현 + 턴 빌더
+    |-- profile.py         프로필 — 설문·지역 저장 (가구현 로그인 x-user-id 와 짝)
     |-- api/
     |   `-- v1.py          [HTTP 경계]  구획: ①요청 모델 ②인증(+Entra 가이드) ③라우트
     |-- respond/
