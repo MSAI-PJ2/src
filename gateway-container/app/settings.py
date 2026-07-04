@@ -59,20 +59,23 @@ RAG_TOP_N = int(os.getenv("RAG_TOP_N", os.getenv("RERANK_TOP_N", "4")))
 # 0 = 꺼짐(현행). sigmoid multi_label 모델은 점수가 낮게 깔리므로 값 설정 시 주의.
 POLICY_MIN_CONFIDENCE = float(os.getenv("POLICY_MIN_CONFIDENCE", "0.0"))
 
-# --- 컨텍스트 병합 재분류 (twopass) — 노브 근거: gateway_policy_lab_2026-07-04 실측 ---
+# --- 컨텍스트 병합 재분류 (twopass) ---
 # 단독 분류가 '불충분'일 때 직전 발화들과 합쳐 1회 재분류한다 (respond/context_merge.py).
-# 실측: 파편 턴 회복 0.84 · 화제전환 오염 0.00 (novelty 게이트 포함) · 분류기 호출 1.36/턴.
+# 노브 근거 = 배포와 동일 가중치(multi_large_v2·멀티라벨)로 120시나리오/380턴 재측정
+# (gateway_convergence_e2e_2026-07-04): 파편 턴 회복 0.04(현행) → 0.56 · 화제전환 오염 0.00
+# · 잡담 날조 0.00 · 정상 오탐 0.00 · 분류기 호출 1.35/턴.
 # ※ 이 플래그는 "병합 재분류"만 끈다 — 아래 완화 사다리는 별도 노브(ESCAPE_AFTER=0)로 끈다.
 CLASSIFY_RETRY_ON_INSUFFICIENT = _bool("CLASSIFY_RETRY_ON_INSUFFICIENT", True)
-# 병합에 끌어올 직전 사용자 발화 수 — 3이 2보다 회복률 우위 (0.84 vs 0.69). 0 = 병합 끔
+# 병합에 끌어올 직전 사용자 발화 수 — 3이 2보다 회복률 우위 (0.56 vs 0.40, 배포 가중치 기준). 0 = 병합 끔
 CLASSIFY_CONTEXT_MAX_TURNS = int(os.getenv("CLASSIFY_CONTEXT_MAX_TURNS", "3"))
-# 병합문 길이 상한(자) — 분류기 절단선(160토큰 ≈ 300자)의 안전 마진. 240과 성능 동률
+# 병합문 길이 상한(자) — 분류기 절단선(160토큰 ≈ 300자)의 안전 마진
 CLASSIFY_CONTEXT_MAX_CHARS = int(os.getenv("CLASSIFY_CONTEXT_MAX_CHARS", "180"))
 
 # --- 연속 '불충분' 완화 사다리 (respond/policy.py 구획 1·2) ---
 # 병합 재분류를 거치고도 '불충분'이 이 횟수째 연속되면 질문을 멈추고 수용·동행
-# 모드로 전환한다 (발화 회피 신호로 해석). 실측: 문턱 4에서 회피형(100% 도달)과
-# 비회피(0.9% 도달)가 거의 완전 분리 — 2였다면 비회피의 21%가 오탈출.
+# 모드로 전환한다 (발화 회피 신호로 해석). 배포 가중치 실측: 문턱 4에서 회피형
+# 12/12(100%) 도달 vs 비회피 0/108(0%) — 완전 분리. 문턱 2였다면 비회피의
+# 10%(병합 켬)~45%(병합 끔)가 수용 모드로 오탈출했을 값.
 # 0 = 사다리 전체 끔 (0=꺼짐 관례, POLICY_MIN_CONFIDENCE 와 동일). 최소 유효값은 2 권장.
 INSUFFICIENT_ESCAPE_AFTER = int(os.getenv("INSUFFICIENT_ESCAPE_AFTER", "4"))
 

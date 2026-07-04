@@ -132,10 +132,13 @@ def test_trailing_insufficient_counts_and_breaks():
 # 2) e2e 계약 — 순서 지정 가짜 분류기로 twopass/게이트/사다리 흐름 검증
 # ---------------------------------------------------------------------------
 
-def _cls(primary, score=0.9):
-    return {"text": "", "mode": "single_label", "model": "fake", "model_version": "t",
-            "threshold": 0.5, "primary": primary,
-            "labels": [{"label": primary, "score": score, "selected": True}]}
+def _cls(primary, score=0.95):
+    """배포 분류기(multi_label sigmoid) 응답 형태 — score 는 독립 확률, 정상/불충분 배타."""
+    return {"text": "", "mode": "multi_label", "model": "klue/roberta-large",
+            "model_version": "multi_large_v2", "threshold": 0.55, "primary": primary,
+            "labels": [{"label": primary, "score": score, "selected": True},
+                       {"label": "정상" if primary != "정상" else "불충분",
+                        "score": 0.02, "selected": False}]}
 
 
 class SeqClassifier:

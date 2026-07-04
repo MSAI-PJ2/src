@@ -8,10 +8,15 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+# 배포 분류기 기준(multi_label · klue/roberta-large multi_large_v2)의 응답 형태를 흉내낸다.
+# multi_label 에서 score 는 라벨별 독립 sigmoid(합이 1이 아님), selected 는 threshold 기반
+# 다중 선택 — selection_policy 가 정상/불충분을 배타 처리한다 (게이트웨이는 primary 만 라우팅).
 CLS_RESULT = {
-    "text": "테스트 발화", "mode": "single", "model": "cogdist-test", "model_version": "test",
-    "threshold": 0.5, "primary": "흑백 사고",
-    "labels": [{"label": "흑백 사고", "score": 0.91, "selected": True}],
+    "text": "테스트 발화", "mode": "multi_label", "model": "klue/roberta-large",
+    "model_version": "multi_large_v2", "threshold": 0.55, "primary": "흑백 사고",
+    "labels": [{"label": "흑백 사고", "score": 0.91, "selected": True},
+               {"label": "과잉 일반화", "score": 0.62, "selected": True},
+               {"label": "불충분", "score": 0.03, "selected": False}],
 }
 CANDIDATES = [
     {"id": "d1", "content": "근거 검토 기법", "score": 0.9, "metadata": {"distortions": ["흑백 사고"]}},
