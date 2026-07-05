@@ -113,3 +113,10 @@ SESSION_REPOSITORY = os.getenv("SESSION_REPOSITORY", "memory")
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))      # 세션 유효시간(초)
 SESSION_MAX_TURNS = int(os.getenv("SESSION_MAX_TURNS", "20"))            # 세션당 최대 저장 턴 수
 SESSION_CONTEXT_TURNS = int(os.getenv("SESSION_CONTEXT_TURNS", "6"))     # LLM 에 주는 최근 대화 수
+
+# --- SHAP 설명(연산 과정 보기) ---
+# 캐싱 없이 요청마다 새로 계산한다 (프론트 "연산 과정 보기" 버튼 클릭 시에만 호출됨).
+# max_evals 가 클수록 정확하지만 느려진다 — SHAP 계산 기준 문장 하나에 수 초~수십 초.
+SHAP_MAX_EVALS = int(os.getenv("SHAP_MAX_EVALS", "64"))
+# --- SHAP 설명(연산 과정 보기) 전용 타임아웃 — /v1/predict 보다 훨씬 느릴 수 있어 별도로 둠 ---
+SHAP_REQUEST_TIMEOUT_SECONDS = float(os.getenv("SHAP_REQUEST_TIMEOUT_SECONDS", "90"))
