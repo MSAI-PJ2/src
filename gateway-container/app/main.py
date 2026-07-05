@@ -7,6 +7,10 @@ Dockerfile 의 `uvicorn app.main:app` 이 이 파일의 `app` 객체(FastAPI 서
     상담 흐름(기계장치)     → respond/flow.py
     정책·프롬프트(사람편집) → respond/policy.py
 """
+from dotenv import load_dotenv
+load_dotenv()
+
+
 import logging
 import os
 import uuid
