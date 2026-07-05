@@ -34,9 +34,10 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 class SessionRepository(Protocol):
     async def create(self, session_id: str | None = None) -> dict[str, Any]: ...
     async def ensure(self, session_id: str | None = None) -> dict[str, Any]: ...          # 없으면 만들고, 있으면 갱신
-    async def append_turn(self, session_id: str, turn: dict[str, Any]) -> dict[str, Any]: ...
+    async def append_turn(self, session_id: str, turn: dict[str, Any], user_id: str | None = None) -> dict[str, Any]: ...
     async def snapshot(self, session_id: str) -> dict[str, Any] | None: ...               # 현재 상태 조회
     async def recent_llm_messages(self, session_id: str, max_turns: int | None = None) -> list[dict[str, str]]: ...
+    async def list_for_user(self, user_id: str) -> list[dict[str, Any]]: ...  # 이 사용자의 세션 목록(요약)
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +87,7 @@ _sessions: dict[str, dict[str, Any]] = {}
 def _new_item(sid: str) -> dict[str, Any]:
     now = now_ts()
     return {"session_id": sid, "updated_ts": now,
-            "created_at": iso(now), "updated_at": iso(now), "turns": []}
+            "created_at": iso(now), "updated_at": iso(now), "turns": [], "user_id": None}
 
 
 def _prune_locked() -> None:
@@ -124,14 +125,17 @@ class InMemorySessionRepository:
                 return _snapshot_locked(sid)
         return await self.create(sid)
 
-    async def append_turn(self, session_id: str, turn: dict[str, Any]) -> dict[str, Any]:
-        """턴 하나를 뒤에 붙인다. 최대 개수(SESSION_MAX_TURNS)를 넘으면 앞에서부터 버린다."""
+    async def append_turn(self, session_id: str, turn: dict[str, Any], user_id: str | None = None) -> dict[str, Any]:
         sid = valid_session_id(session_id) or new_session_id()
         with _lock:
             _prune_locked()
             item = _sessions.setdefault(sid, _new_item(sid))
+            if user_id and not item.get("user_id"):
+                item["user_id"] = user_id  # 세션 최초 생성한 사용자로 한 번만 고정
             clean = dict(turn)
-            clean.setdefault("ts", iso())  # 저장 시각 기록
+            clean.setdefault("ts", iso())
+            if clean.get("role") == "user" and not item.get("preview"):
+                item["preview"] = (clean.get("text") or "")[:40]  # 목록 카드용 첫 발화 미리보기
             item["turns"] = (item["turns"] + [clean])[-settings.SESSION_MAX_TURNS:]
             item["updated_ts"] = now_ts()
             item["updated_at"] = iso(item["updated_ts"])
@@ -151,6 +155,15 @@ class InMemorySessionRepository:
             item = _sessions.get(sid) if sid else None
             turns = list(item["turns"][-limit:]) if item else []
         return turns_to_llm_messages(turns)
+    
+    async def list_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        with _lock:
+            _prune_locked()
+            return [
+                {"session_id": sid, "created_at": it["created_at"], "updated_at": it["updated_at"],
+                 "turn_count": len(it["turns"]), "preview": it.get("preview", "")}
+                for sid, it in _sessions.items() if it.get("user_id") == user_id
+            ]
 
 
 # ---------------------------------------------------------------------------
@@ -207,12 +220,12 @@ class CosmosSessionRepository:
         return {"session_id": item["session_id"], "created_at": item["created_at"],
                 "updated_at": item["updated_at"], "turn_count": len(turns), "turns": turns}
 
-    def _new_doc(self, sid: str) -> dict[str, Any]:
+    def _new_doc(self, sid: str, user_id: str | None = None) -> dict[str, Any]:
         now = now_ts()
-        item = {"id": sid, "session_id": sid, "updated_ts": now,
+        item = {"id": sid, "session_id": sid, "user_id": user_id, "updated_ts": now,
                 "created_at": iso(now), "updated_at": iso(now), "turns": []}
         if settings.SESSION_TTL_SECONDS > 0:
-            item["ttl"] = settings.SESSION_TTL_SECONDS  # Cosmos 가 TTL 후 자동 삭제
+            item["ttl"] = settings.SESSION_TTL_SECONDS
         return item
 
     def _touch(self, item: dict[str, Any]) -> None:
@@ -243,16 +256,16 @@ class CosmosSessionRepository:
             item = self._read(sid) or item  # 다른 요청이 먼저 갱신함 — 최신본을 반환만 한다
         return self._to_snapshot(item)
 
-    def _append_turn_sync(self, session_id: str, turn: dict[str, Any]) -> dict[str, Any]:
+    def _append_turn_sync(self, session_id: str, turn: dict[str, Any], user_id: str | None = None) -> dict[str, Any]:
         sid = valid_session_id(session_id) or new_session_id()
         clean = dict(turn)
         clean.setdefault("ts", iso())
-        # 최대 4회 재시도: 동시 요청과 충돌하면 최신 문서를 다시 읽어 다시 쓴다 → 턴 유실 방지
         for _ in range(4):
             item = self._read(sid)
             if item is None:
-                # 문서가 아직 없음 → 새로 생성. 동시에 다른 요청이 먼저 만들었으면(409) 재시도
-                item = self._new_doc(sid)
+                item = self._new_doc(sid, user_id)
+                if clean.get("role") == "user" and not item.get("preview"):
+                    item["preview"] = (clean.get("text") or "")[:40]  # 목록 카드용 첫 발화 미리보기
                 item["turns"] = [clean]
                 try:
                     self._container.create_item(body=item)
@@ -260,6 +273,8 @@ class CosmosSessionRepository:
                 except self._conflict:
                     continue
             # 기존 문서에 턴 추가 (최대 개수 초과분은 앞에서부터 버림)
+            if clean.get("role") == "user" and not item.get("preview"):
+                item["preview"] = (clean.get("text") or "")[:40]
             item["turns"] = (list(item.get("turns") or []) + [clean])[-settings.SESSION_MAX_TURNS:]
             self._touch(item)
             try:
@@ -285,8 +300,20 @@ class CosmosSessionRepository:
     async def ensure(self, session_id: str | None = None) -> dict[str, Any]:
         return await asyncio.to_thread(self._ensure_sync, session_id)
 
-    async def append_turn(self, session_id: str, turn: dict[str, Any]) -> dict[str, Any]:
-        return await asyncio.to_thread(self._append_turn_sync, session_id, turn)
+    async def append_turn(self, session_id: str, turn: dict[str, Any], user_id: str | None = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self._append_turn_sync, session_id, turn, user_id)
+
+    async def list_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        def _query():
+            items = self._container.query_items(
+                query="SELECT c.session_id, c.created_at, c.updated_at, c.preview, "
+                      "ARRAY_LENGTH(c.turns) AS turn_count "
+                      "FROM c WHERE c.user_id = @uid ORDER BY c.updated_at DESC",
+                parameters=[{"name": "@uid", "value": user_id}],
+                enable_cross_partition_query=True,
+            )
+            return list(items)
+        return await asyncio.to_thread(_query)
 
     async def snapshot(self, session_id: str) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._snapshot_sync, session_id)
