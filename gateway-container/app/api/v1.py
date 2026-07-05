@@ -386,4 +386,7 @@ async def get_session(session_id: str):
     return state
 
 
+from ..career import career as career_router
+
+v1.include_router(career_router)
 router.include_router(v1)
