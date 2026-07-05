@@ -8,6 +8,7 @@ DEFAULT_THRESHOLD = float(os.getenv("DEFAULT_THRESHOLD", "0.55"))
 MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "32"))
 MAX_LENGTH = int(os.getenv("MAX_LENGTH", "160"))
 
+
 # --- SHAP 설명(연산 과정 보기) ---
 # 캐싱 없이 요청마다 새로 계산한다 (프론트 "연산 과정 보기" 버튼 클릭 시에만 호출됨).
 # max_evals 가 클수록 정확하지만 느려진다 — SHAP 계산 기준 문장 하나에 수 초~수십 초.
