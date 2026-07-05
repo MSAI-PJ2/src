@@ -65,6 +65,17 @@ class ClassifierAdapter:
         response.raise_for_status()  # HTTP 오류(4xx/5xx)면 여기서 예외 발생
         return parse_result(response.json(), fallback_text=text, threshold=threshold)
 
+    async def explain_text(self, text: str, label: str | None = None) -> dict:
+        """문장 1개의 SHAP 토큰 기여도: cogdist 의 /v1/explain 호출. 캐싱 없이 호출마다 새로 계산한다.
+
+        SHAP 계산은 /v1/predict 보다 훨씬 느릴 수 있어 전용 타임아웃(SHAP_REQUEST_TIMEOUT_SECONDS)을 쓴다.
+        """
+        response = await _http().post(f"{settings.KLUE_API_URL}/v1/explain",
+                                      json={"text": text, "label": label},
+                                      timeout=settings.SHAP_REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json()
+
     async def classify_batch(self, texts: list[str], threshold: float | None = None) -> dict:
         """문장 여러 개 분류. 항목별로 성공(ok=True)/실패를 구분해서 돌려준다."""
         response = await _http().post(f"{settings.KLUE_API_URL}/v1/batch-predict",
