@@ -10,3 +10,7 @@ azure-cosmos>=4.7.0
 azure-monitor-opentelemetry
 azure-ai-documentintelligence>=1.0.0
 PyJWT[crypto]>=2.8.0
+transformers>=4.40
+safetensors
+numpy
+shap>=0.45
