@@ -425,4 +425,9 @@ async def explain_turn(session_id: str, turn_index: int, label: str | None = Non
     return result
 
 
+# 취준 기능(공고 분석·자소서/이력서) 라우터 — /v1/career/* 등록. ⚠️ v1.py 를 통째로
+# 교체·업로드할 때 이 4줄이 빠지면 career 기능 전체가 서버에서 사라진다. 반드시 유지할 것.
+from ..career import career as career_router  # noqa: E402
+
+v1.include_router(career_router)
 router.include_router(v1)
