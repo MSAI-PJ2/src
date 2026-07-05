@@ -1,9 +1,13 @@
-﻿import logging
+from dotenv import load_dotenv
+load_dotenv()
+
+import logging
 
 from fastapi import FastAPI, HTTPException, Response, status
 
 from app.model import Classifier
-from app.schemas import BatchItem, BatchPredictRequest, BatchResponse, ClassifyResult, PredictRequest
+from app.schemas import (BatchItem, BatchPredictRequest, BatchResponse, ClassifyResult,
+                         ExplainRequest, ExplainResult, PredictRequest)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,6 +53,17 @@ def predict(req: PredictRequest) -> dict:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail="text must be a non-empty string")
     return classifier.predict(req.text, req.threshold)
+
+
+@app.post("/v1/explain", response_model=ExplainResult)
+def explain(req: ExplainRequest) -> dict:
+    """SHAP 기반 토큰 기여도 계산 — 캐싱 없음, 호출할 때마다 새로 계산 (문장 길이에 따라 느릴 수 있음)."""
+    if not ready or classifier is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"status": "loading"})
+    try:
+        return classifier.explain(req.text, req.label, req.max_evals)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 @app.post("/v1/batch-predict", response_model=BatchResponse)
