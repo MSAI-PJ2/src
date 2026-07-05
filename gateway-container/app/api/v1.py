@@ -377,6 +377,14 @@ async def create_session(body: SessionCreateIn | None = None):
     return await session_repository.create(body.session_id if body else None)
 
 
+@v1.get("/sessions")
+async def list_sessions(user_id: str = Depends(current_user)):
+    """현재 로그인한 사용자(user_id)의 세션 목록(요약)을 최신순으로 반환한다.
+    user_id 가 없는 옛날 세션(가상 ID 도입 이전에 만들어진 익명 세션)은 이 목록에
+    안 잡힌다 — 그런 세션은 여전히 GET /v1/sessions/{session_id}로 직접 조회 가능."""
+    return await session_repository.list_for_user(user_id)
+
+
 @v1.get("/sessions/{session_id}")
 async def get_session(session_id: str):
     """세션의 저장된 대화 기록을 조회한다. 없으면 404."""
@@ -386,7 +394,35 @@ async def get_session(session_id: str):
     return state
 
 
-from ..career import career as career_router
+@v1.get("/sessions/{session_id}/turns/{turn_index}/explain")
+async def explain_turn(session_id: str, turn_index: int, label: str | None = None):
+    """특정 세션의 특정 턴 원문을 Cosmos에서 가져와 SHAP 토큰 기여도를 계산한다.
 
-v1.include_router(career_router)
+    turn_index 는 GET /v1/sessions/{session_id} 응답의 turns 배열 인덱스(0부터)와 동일하다.
+    캐싱 없음 — 호출할 때마다(대시보드의 "연산 과정 보기" 버튼 클릭 시) 매번 새로 계산한다.
+    label 을 생략하면 그 턴의 primary 라벨 기준으로 설명한다.
+
+    주의(컨텍스트 병합 도입 이후): analysis.context_merged=true 인 턴은
+    분류가 "원문 단독"이 아니라 "직전 발화와 합친 문장"으로 이뤄졌다 — 병합된 문장
+    자체는 세션에 저장되지 않으므로, 여기서는 원문(text)만으로 SHAP을 계산한다.
+    그 결과 이 턴은 SHAP 결과가 실제 분류 근거와 다르게 보일 수 있어 context_merged
+    플래그를 함께 내려준다 (API_CONTRACT.md §14 참고 — 프론트는 이 값으로 경고 표시).
+    """
+    state = await session_repository.snapshot(session_id)
+    if state is None:
+        raise HTTPException(404, "session not found")
+    turns = state.get("turns", [])
+    if turn_index < 0 or turn_index >= len(turns):
+        raise HTTPException(404, "turn not found")
+    turn = turns[turn_index]
+    text = (turn.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "turn has no text to explain")
+    result = await services.classifier.explain_text(text, label)
+    analysis = turn.get("analysis") or {}
+    result["context_merged"] = bool(analysis.get("context_merged"))
+    result["merge_trigger"] = analysis.get("merge_trigger")
+    return result
+
+
 router.include_router(v1)
