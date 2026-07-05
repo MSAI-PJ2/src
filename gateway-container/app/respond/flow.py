@@ -1,595 +1,428 @@
-"""[상담 흐름 — 기계장치] 상담 한 턴이 "어떻게" 흘러가는지가 전부 이 파일에 있다.
-
-"무엇을 답할지"(정책·프롬프트·위기 문구)는 respond/policy.py — 이 파일은 순서와 배관만.
+"""[HTTP 경계] 프론트와 서버가 만나는 지점 — 요청 모양·인증·URL 목록이 전부 이 파일에 있다.
 
 구획 목차 (Ctrl+F 로 "[구획" 검색):
-    [구획 1] SSE 이벤트     프론트로 내보내는 메시지 조각들의 형식 + 단계 진행 신호(progress)
-    [구획 2] 요청 정리      "텍스트/음성/이미지 중 뭐가 왔나" 판단 (RespondRequestContext)
-    [구획 3] RAG 선별       검색 결과 중복 제거 후 상위 top_n 개만 고르기
-    [구획 4] 진입 스트림    stt(음성)/ocr(이미지)/입력없음 — 성공하면 [구획 5]로 합류
-    [구획 5] respond_stream 핵심 6단계: 세션→병렬분석→정책→(위기)→LLM 스트리밍→저장
+    [구획 1] 요청 모델   프론트가 보내는 JSON 의 모양 (Pydantic — 형식이 틀리면 자동 422)
+    [구획 2] 인증        x-api-key 검사 + Entra External ID 도입 가이드
+    [구획 3] 라우트      URL 목록. HTTP 만 담당 — 상담 로직은 respond/flow.py 에 위임
 
-읽는 법 — 스트림 함수들은 "제너레이터"다:
-    yield sse(...) = "이벤트 하나를 프론트로 지금 내보내라". return 처럼 끝나지 않고
-    다음 줄로 계속 진행하므로, 위에서 아래로 읽으면 프론트가 받는 이벤트 순서와 같다.
-    await = Azure 응답을 기다리는 동안 다른 요청 처리를 양보한다는 표시.
+참고 — 함수 앞의 async: "비동기 함수". 한 요청이 Azure 응답을 기다리는 동안에도
+서버가 다른 요청을 처리할 수 있게 해 준다. await = "결과가 올 때까지 이 요청만 대기".
 """
-from __future__ import annotations
-
 import asyncio
-import json
-import logging
-from dataclasses import dataclass
-from typing import Any
+import re
+from typing import Any, Literal
+
+import httpx
+from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from .. import settings
+from ..profile import profile_repository
+from ..respond import flow
+from ..respond.flow import RespondRequestContext
 from ..services import services
-from ..session import (
-    assistant_turn, crisis_turn, input_pending_turn, ocr_failed_turn,
-    session_repository, stt_failed_turn, user_turn,
-)
-from . import context_merge
-from . import policy as respond_policy
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_LANGUAGE = "ko-KR"
+from ..session import session_repository
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# [구획 1] SSE 이벤트 — 스트리밍으로 프론트엔드에 보내는 메시지 조각들의 형식
+# [구획 1] 요청 모델 — 프론트엔드가 보내는 JSON 의 모양(스키마)
 #
-# SSE(Server-Sent Events) = 서버가 응답을 끊지 않고 "data: {...}" 줄을 계속
-# 흘려보내는 방식. 프론트는 type 필드로 구분해 화면에 반영한다.
-# 이벤트 종류/필드는 API_CONTRACT.md 와 1:1 — 여기를 바꾸면 프론트도 바꿔야 한다.
-# DB 에 저장하는 대화 기록은 session.py 의 턴 빌더 — 역할이 다르므로 섞지 않는다.
+# Pydantic 모델 = "이 요청에는 이런 이름/타입의 필드가 온다"는 선언. FastAPI 가
+# 요청 JSON 을 자동 검사해서 형식이 틀리면 코드 실행 전에 422 오류를 돌려준다.
+# `str | None = None` 은 "문자열 또는 생략 가능(기본 None)".
+# 필드의 자세한 의미는 API_CONTRACT.md 가 기준 문서다.
 # ══════════════════════════════════════════════════════════════════════════
 
-INPUT_REQUIRED_STT_MESSAGE = (
-    "audio payload was accepted, but STT did not produce a transcript. "
-    "Check stt event error/reason, or send text/stt.transcript."
-)
-INPUT_REQUIRED_TEXT_MESSAGE = (
-    "No text or transcript was provided. Send text, stt.transcript, or an audio payload."
-)
-INPUT_REQUIRED_OCR_MESSAGE = (
-    "image payload was accepted, but OCR did not produce user messages. "
-    "Check ocr event error/reason, or send text instead."
-)
+class ClassifyIn(BaseModel):
+    """POST /v1/classify 의 입력."""
+    text: str
+    threshold: float | None = None  # 분류 확신 기준값 (생략 시 모델 기본값)
 
 
-def sse(obj: dict) -> str:
-    """dict 하나를 SSE 한 프레임("data: {...}\\n\\n")으로 직렬화한다."""
-    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+class BatchClassifyIn(BaseModel):
+    """POST /v1/batch-classify 의 입력 — 문장 여러 개."""
+    texts: list[str]
+    threshold: float | None = None
 
 
-def stt_processing_event(session_id: str, provider: str, language: str) -> dict:
-    """"음성 인식을 시작했다"는 알림 — 프론트가 로딩 표시를 띄울 수 있게."""
-    return {"type": "stt", "session_id": session_id, "status": "processing",
-            "provider": provider, "language": language}
+class AudioIn(BaseModel):
+    """음성 입력. kind 가 base64 면 data 에, url 이면 url 에 오디오가 담긴다."""
+    kind: Literal["url", "base64"] = "url"  # base64 는 소용량 테스트용
+    url: str | None = None
+    data: str | None = None                 # base64 로 인코딩된 오디오 바이트
+    mime_type: str | None = None            # 예: audio/webm, audio/wav
+    language: str | None = "ko-KR"
 
 
-def stt_result_event(session_id: str, result: dict) -> dict:
-    """음성 인식 결과 (성공: transcript 포함 / 실패: error·reason 포함)."""
-    return {"type": "stt", "session_id": session_id, **result}
+class ImageIn(BaseModel):
+    """채팅 캡쳐 이미지 입력 (jpeg/png). base64 또는 url 로 전달."""
+    kind: Literal["url", "base64"] = "base64"
+    url: str | None = None
+    data: str | None = None      # base64 로 인코딩된 이미지 바이트
+    mime_type: str | None = None  # 예: image/jpeg, image/png
 
 
-def ocr_processing_event(session_id: str) -> dict:
-    """"이미지 인식을 시작했다"는 알림."""
-    return {"type": "ocr", "session_id": session_id, "status": "processing",
-            "provider": "azure_document_intelligence"}
+class OcrIn(BaseModel):
+    """OCR 옵션 — 이미지를 어떻게 해석할지.
 
-
-def ocr_result_event(session_id: str, result: dict) -> dict:
-    """OCR 결과 (성공: conversation 포함 / 실패: error 포함)."""
-    return {"type": "ocr", "session_id": session_id, **result}
-
-
-def input_required_event(session_id: str, reason: str, message: str) -> dict:
-    """처리할 입력이 없거나 STT/OCR 실패 — 사용자에게 재입력을 요청한다."""
-    return {"type": "input_required", "session_id": session_id, "reason": reason, "message": message}
-
-
-def meta_event(session_id: str, turn_count: int, input_meta: dict, tts: dict | None,
-               cls: dict | None = None, analysis: dict | None = None) -> dict:
-    """턴 시작 정보: 몇 번째 턴인지 + 인지왜곡 분류 결과(primary/labels).
-
-    analysis: 이번 턴 분류가 "어떻게" 나왔는지의 관측 필드 (실험·디버깅용, 추가 계약):
-        context_merged    선행 필터가 병합문을 분류 입력으로 골랐는가
-        merge_trigger     병합을 발동시킨 트리거 ("prev_insufficient" | "short_utterance") 또는 None
-        merge_rejected_by 병합을 포기한 이유 ("novelty" = 화제 전환 감지) 또는 None
-        ladder_step       이번 턴 포함 연속 '불충분' 횟수 (0 = 불충분 아님)
+    profile: generic(일반 이미지 — 텍스트 전체 추출, 기본)
+           | kakao(카톡 캡쳐 — 화자 분리 후 "나" 발화만 상담 입력으로)
+    sender_names: kakao 프로파일에서 채팅방 상단 상대 이름 — 화자 판별 정확도를 높인다.
     """
-    payload = {"type": "meta", "session_id": session_id, "turn_count": turn_count,
-               "input": input_meta, "tts": tts}
-    if cls:
-        payload.update({"primary": cls["primary"], "mode": cls["mode"], "labels": cls["labels"]})
-    if analysis is not None:
-        payload["analysis"] = analysis
-    return payload
+    profile: Literal["generic", "kakao"] = "generic"
+    sender_names: list[str] | None = None
 
 
-def chunks_event(session_id: str, chunks: list[dict]) -> dict:
-    """RAG 로 검색된 참고자료 목록 (id 와 본문만 추려서 전달)."""
-    return {"type": "chunks", "session_id": session_id,
-            "chunks": [{"id": c["id"], "content": c["content"]} for c in chunks]}
+class SttIn(BaseModel):
+    """음성→텍스트 관련 정보. transcript(전사문)가 이미 있으면 STT 를 건너뛴다."""
+    provider: str | None = None
+    language: str | None = "ko-KR"
+    transcript: str | None = None
+    confidence: float | None = None
 
 
-def token_event(session_id: str, text: str) -> dict:
-    """LLM 이 생성한 답변 조각 — 이 이벤트들을 이어붙이면 전체 답변이 된다."""
-    return {"type": "token", "session_id": session_id, "text": text}
+class TtsIn(BaseModel):
+    """텍스트→음성 옵션. enabled=true 면 답변을 음성으로도 합성해 준다."""
+    enabled: bool = False
+    provider: str | None = None
+    voice: str | None = None      # 예: ko-KR-SunHiNeural
+    format: str | None = "mp3"
+    speed: float | None = None
 
 
-def tts_event(session_id: str, tts_result: dict) -> dict:
-    """합성된 음성 (base64 오디오 포함) 또는 합성 실패 정보."""
-    return {"type": "tts", "session_id": session_id, **tts_result}
+class LlmIn(BaseModel):
+    """요청 단위 LLM 옵션. 서버측 상한(AZURE_OPENAI_MAX_COMPLETION_TOKENS_LIMIT)이 항상 우선."""
+    max_completion_tokens: int | None = None  # 답변 최대 길이(토큰)
+    temperature: float | None = None          # 높을수록 답변이 다양/무작위
 
 
-def done_event(session_id: str) -> dict:
-    """이 턴의 스트리밍이 끝났다는 신호 — 항상 마지막 이벤트."""
-    return {"type": "done", "session_id": session_id}
+class RespondIn(BaseModel):
+    """POST /v1/respond 의 입력 — 텍스트/음성/전사문/채팅캡쳐 이미지 중 하나로 상담을 요청한다."""
+    text: str | None = None
+    session_id: str | None = None   # 대화방 ID. 같은 ID 로 보내면 대화가 이어진다
+    input_type: Literal["text", "audio", "transcript", "image"] | None = None
+    audio: AudioIn | None = None
+    image: ImageIn | None = None
+    ocr: OcrIn | None = None
+    stt: SttIn | None = None
+    tts: TtsIn | None = None
+    llm: LlmIn | None = None
+    client: dict[str, Any] | None = None    # 프론트가 넣는 자유 필드 (그대로 저장됨)
+    metadata: dict[str, Any] | None = None
 
+    def effective_text(self) -> str | None:
+        """실제 처리할 텍스트를 고른다: text 가 있으면 text, 없으면 stt.transcript."""
+        text = (self.text or "").strip()
+        if text:
+            return text
+        transcript = ((self.stt.transcript if self.stt else None) or "").strip()
+        return transcript or None
 
-# ── 단계 진행 신호(progress) ──────────────────────────────────────────────
-# 프론트엔드가 "지금 어디까지 왔는지" 로딩 UI(체크리스트/진행바)를 그릴 수 있도록,
-# 파이프라인의 각 단계가 "끝날 때마다" progress 이벤트를 하나씩 내보낸다.
-#
-# 단계 이름(stage)과 순서 — 요청 형태에 따라 앞뒤가 붙거나 빠진다:
-#   extract   입력 변환: 음성(STT)·이미지(OCR) → 텍스트.  음성/이미지 입력일 때만.
-#   input     상담 문장 접수: 처리할 텍스트가 확정되고 세션(대화방)이 준비됨.
-#   analyze   동시 분석: 안전 점검 + 인지왜곡 분류 + 자료 검색(gather 3종) 완료.
-#   route     응답 방침 결정: 정책 라우팅 + (평상시) 프롬프트 구성까지 완료.
-#   generate  답변 생성: LLM 스트리밍 종료. SSE 에서는 생성과 동시에 token 으로
-#             전송되므로 "생성 완료 = 텍스트 송신 완료"다 (별도 송신 단계 없음).
-#             위기(crisis) 분기는 LLM 을 부르지 않으므로 이 단계가 없다.
-#   speak     음성 합성: TTS 완료.  요청에 tts.enabled=true 일 때만.
-#
-# 이벤트 모양: {"type":"progress","session_id":...,"stage":"analyze",
-#               "seq":2,"total":4,"label":"동시 분석(...) 완료"}
-#   seq/total = 이 요청이 거칠 전체 단계 중 몇 번째가 끝났는지 (진행바용).
-#   ※ 위기 분기가 확정되면 generate 단계가 사라지므로 route 이벤트부터 total 이
-#     1 줄어든다. 프론트는 crisis 이벤트를 받으면 어차피 위기 화면으로 전환하므로
-#     실용상 문제가 없다 (API_CONTRACT 7장 참고).
-#   ※ STT/OCR 실패·입력 없음 경로는 진행할 단계가 없으므로 progress 를 보내지
-#     않고 기존 실패 이벤트(input_required)로 끝난다.
-# ──────────────────────────────────────────────────────────────────────────
-
-# 단계별 사용자 안내 문구 — 프론트가 그대로 표시해도 되고 stage 로 직접 분기해도 된다.
-STAGE_LABELS = {
-    "extract": "입력 변환(음성·이미지 → 텍스트) 완료",
-    "input": "상담 문장 접수 완료",
-    "analyze": "동시 분석(안전 점검·왜곡 분류·자료 검색) 완료",
-    "route": "응답 방침 결정·프롬프트 구성 완료",
-    "generate": "상담 답변 생성 완료",
-    "speak": "음성 합성 완료",
-}
-
-
-def stage_plan(extracted: bool, tts: dict | None, crisis: bool = False) -> list[str]:
-    """이 요청이 거칠 단계 목록을 순서대로 만든다 — progress 의 seq/total 근거.
-
-    extracted: 이 게이트웨이 안에서 STT/OCR 변환을 거쳤는가 (진입 스트림이 True 로 넘김.
-               프론트가 전사문(stt.transcript)을 직접 보낸 경우는 변환이 없으므로 False).
-    crisis:    위기 분기 확정 후 True — generate(LLM) 단계가 계획에서 빠진다.
-    """
-    plan = (["extract"] if extracted else []) + ["input", "analyze", "route"]
-    if not crisis:
-        plan.append("generate")
-    if tts and tts.get("enabled"):
-        plan.append("speak")
-    return plan
-
-
-def progress_event(session_id: str, stage: str, plan: list[str]) -> dict:
-    """단계 하나가 '끝났다'는 신호 한 건을 만든다 (계획 안에서의 위치 포함)."""
-    return {"type": "progress", "session_id": session_id, "stage": stage,
-            "seq": plan.index(stage) + 1, "total": len(plan),
-            "label": STAGE_LABELS.get(stage, stage)}
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# [구획 2] 요청 정리 — "이 요청이 텍스트인가, 음성인가, 이미지인가" 판단
-#
-# api/v1.py 가 요청을 받자마자 from_body() 로 이 객체를 만들고,
-# requires_ocr / requires_stt / has_text 로 어느 흐름으로 보낼지 결정한다.
-# ══════════════════════════════════════════════════════════════════════════
-
-@dataclass(frozen=True)  # 읽기 전용 데이터 묶음 — 흐름 중간에 값이 바뀌는 실수를 막는다
-class RespondRequestContext:
-    session_id: str | None
-    text: str | None               # 실제 처리할 텍스트 (text 또는 stt.transcript 에서 온 것)
-    input_meta: dict[str, Any]     # 입력 형태 기록 (세션 저장·meta 이벤트용)
-    tts: dict[str, Any] | None = None
-    llm: dict[str, Any] | None = None
-
-    @classmethod
-    def from_body(cls, body) -> "RespondRequestContext":
-        """프론트 요청(api/v1.py 의 RespondIn) → 내부 컨텍스트로 변환."""
-        return cls(
-            session_id=body.session_id,
-            text=body.effective_text(),
-            input_meta=body.input_meta(),
-            tts=body.tts.model_dump(exclude_none=True) if body.tts else None,
-            llm=body.llm.model_dump(exclude_none=True) if body.llm else None,
-        )
-
-    # @property = 함수를 변수처럼 읽게 해 주는 문법 (context.has_text 처럼 괄호 없이 사용)
-
-    @property
-    def has_text(self) -> bool:
-        """처리할 텍스트가 있는가?"""
-        return bool((self.text or "").strip())
-
-    @property
-    def requires_stt(self) -> bool:
-        """오디오만 있고 텍스트가 없어서 음성 인식(STT)이 먼저 필요한가?"""
-        return bool(self.input_meta.get("audio")) and not self.has_text
-
-    @property
-    def requires_ocr(self) -> bool:
-        """채팅 캡쳐 이미지만 있고 텍스트가 없어서 OCR 이 먼저 필요한가?"""
-        return bool(self.input_meta.get("image")) and not self.has_text
-
-    @property
-    def audio(self) -> dict[str, Any]:
-        return dict(self.input_meta.get("audio") or {})
-
-    @property
-    def image(self) -> dict[str, Any]:
-        return dict(self.input_meta.get("image") or {})
-
-    @property
-    def sender_names(self) -> list[str]:
-        """OCR 화자 판별 보정용 상대 이름 목록 (요청의 ocr.sender_names)."""
-        return list((self.input_meta.get("ocr") or {}).get("sender_names") or [])
-
-    @property
-    def ocr_profile(self) -> str:
-        """이미지 해석 방법: generic(일반 이미지, 기본) | kakao(카톡 캡쳐 — 화자 분리)."""
-        return (self.input_meta.get("ocr") or {}).get("profile") or "generic"
-
-    @property
-    def language(self) -> str:
-        """인식 언어: stt.language > audio.language > 기본값(ko-KR) 순서로 고른다."""
-        stt = self.input_meta.get("stt") or {}
-        return stt.get("language") or self.audio.get("language") or DEFAULT_LANGUAGE
-
-    @property
-    def stt_provider(self) -> str:
-        return (self.input_meta.get("stt") or {}).get("provider") or "azure"
-
-    def with_transcript(self, result: dict[str, Any]) -> "RespondRequestContext":
-        """STT 성공 후: 전사문을 text 로 넣고 input_type 을 transcript 로 바꾼 새 컨텍스트."""
-        input_meta = {
-            **self.input_meta,
-            "input_type": "transcript",
-            "stt": {
-                **(self.input_meta.get("stt") or {}),
-                "provider": result.get("provider"),
-                "language": result.get("language") or self.language,
-                "transcript": result.get("transcript"),
-                "confidence": result.get("confidence"),
-                "recognition_status": result.get("recognition_status"),
-            },
+    def input_meta(self) -> dict[str, Any]:
+        """어떤 형태의 입력이었는지 기록용으로 정리 (세션 저장·meta 이벤트에 들어감)."""
+        default_type = "image" if self.image else ("audio" if self.audio else "text")
+        return {
+            "input_type": self.input_type or default_type,
+            "audio": self.audio.model_dump(exclude_none=True) if self.audio else None,
+            "image": self.image.model_dump(exclude_none=True) if self.image else None,
+            "ocr": self.ocr.model_dump(exclude_none=True) if self.ocr else None,
+            "stt": self.stt.model_dump(exclude_none=True) if self.stt else None,
+            "client": self.client,
+            "metadata": self.metadata,
         }
-        return RespondRequestContext(self.session_id, result.get("transcript"),
-                                     input_meta, self.tts, self.llm)
 
 
-def default_text_input_meta(input_meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    """input_meta 없이 호출된 경우(내부 호출 등)의 기본 형태."""
-    return input_meta or {"input_type": "text"}
+class SessionCreateIn(BaseModel):
+    """POST /v1/sessions 의 입력. session_id 생략 시 서버가 발급."""
+    session_id: str | None = None
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# [구획 3] RAG 선별 — 검색 결과에서 "프롬프트에 넣을 만큼"만 고른다
-#
-# 하는 일 2가지:
-#   1. 중복 제거 — 같은 id 문서가 여러 번 오면 점수 높은 쪽만 남긴다
-#   2. 점수 내림차순 상위 top_n 개만 반환 (순서 = 검색엔진 점수 그대로)
-#
-# ※ 과거에는 여기에 "라벨 일치 문서 가산점"(rerank)이 있었다 — 2026-07 제거.
-#   근거: 실제 RAG 코퍼스(82청크) 전수 분석 결과 가산점이 참조하는 라벨 필드
-#   (metadata.distortions)가 전 청크에서 비어 있어 한 번도 발동할 수 없었고(죽은
-#   코드), 코퍼스의 분류축(해석편향·정신화·DBT/MI 등)이 분류기 12라벨과 달라
-#   태깅 투자 가치도 낮았다. 라벨→기법 연결은 프롬프트(policy.py [구획 2]
-#   LABEL_GUIDANCE)가 담당한다 — 검색은 발화 내용만으로 충분하다.
-# ══════════════════════════════════════════════════════════════════════════
+class SurveyIn(BaseModel):
+    """POST /v1/profile/survey 의 입력 — 프론트 설문 페이지의 payload 와 1:1.
 
-def select_chunks(candidates: list[dict], top_n: int | None = None) -> list[dict]:
-    """검색 후보를 중복 제거하고 점수 상위 top_n 개만 돌려준다."""
-    top_n = top_n or settings.RAG_TOP_N
-    if not candidates:
-        return []
-    deduped: dict[str, dict] = {}
-    for candidate in candidates:
-        cid = candidate.get("id")
-        score = float(candidate.get("score", 0.0))
-        # 같은 id 문서가 여러 번 오면 점수가 높은 쪽만 남긴다
-        if cid not in deduped or score > float(deduped[cid].get("score", 0.0)):
-            deduped[cid] = candidate
-    return sorted(deduped.values(), key=lambda c: float(c.get("score", 0.0)), reverse=True)[:top_n]
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# [구획 4] 입력 형태별 진입 스트림 — 성공하면 전부 [구획 5] respond_stream 으로 합류
-# ══════════════════════════════════════════════════════════════════════════
-
-async def stt_then_respond_stream(session_id=None, input_meta=None, tts=None, llm=None,
-                                  user_id: str | None = None):
-    """오디오 입력 흐름: 음성→텍스트(STT) 변환 후, 성공하면 일반 상담 흐름으로 넘어간다."""
-    context = RespondRequestContext(session_id, None, input_meta or {}, tts, llm)
-    session = await session_repository.ensure(context.session_id)  # 세션이 없으면 새로 만든다
-    session_id = session["session_id"]
-    context = RespondRequestContext(session_id, None, context.input_meta, tts, llm)
-
-    # "인식 시작" 알림을 먼저 보내고, Azure Speech 로 음성을 텍스트로 변환
-    yield sse(stt_processing_event(session_id, context.stt_provider, context.language))
-    result = await services.speech.transcribe_audio(context.audio)
-
-    if result.get("status") != "completed" or not result.get("transcript"):
-        # STT 실패: 조용히 넘어가지 않고 실패 이벤트 + "다시 입력해달라" 요청을 명시적으로 보낸다
-        await session_repository.append_turn(session_id, stt_failed_turn(context.input_meta, result, tts))
-        yield sse(stt_result_event(session_id, result))
-        yield sse(input_required_event(session_id, result.get("status") or "stt_failed",
-                                       INPUT_REQUIRED_STT_MESSAGE))
-        yield sse(done_event(session_id))
-        return
-
-    # STT 성공: 전사문을 반영한 컨텍스트로 바꾸고 일반 상담 흐름을 이어서 실행
-    context = context.with_transcript(result)
-    yield sse(stt_result_event(session_id, result))
-    # [progress] 1단계(extract) 완료 신고: 음성 → 텍스트 변환이 끝났다.
-    # 이후 단계(input~)는 respond_stream 이 이어서 신고한다 — extracted=True 를 넘겨
-    # 거기서도 같은 단계 계획(총 단계 수)으로 seq/total 을 계산하게 한다.
-    yield sse(progress_event(session_id, "extract", stage_plan(extracted=True, tts=tts)))
-    async for event in respond_stream(context.text or "", session_id, context.input_meta, tts, llm,
-                                      extracted=True, user_id=user_id):
-        yield event  # respond_stream 이 내보내는 이벤트를 그대로 통과시킨다
-
-
-async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, llm=None,
-                                  user_id: str | None = None):
-    """이미지 입력: OCR → ocr 이벤트 → 추출된 사용자 텍스트로 일반 상담 흐름으로.
-
-    STT 흐름과 대칭 구조. 이미지 해석은 ocr.profile 로 갈린다 (services/document_ocr.py):
-        generic  일반 이미지(일기·메모) — 추출 텍스트 전체를 사용자 발화로 (기본)
-        kakao    카톡 캡쳐 — 팀원 파이프라인(원본: di/)으로 화자 분리, "나" 발화만
+    세부 항목은 아직 프론트가 다듬는 중이라 dict 로 느슨하게 받는다 (필드가 늘어도
+    서버 수정 없이 그대로 저장). 서버가 실제로 "해석"하는 값은 location.sido/sigungu
+    하나뿐이며(위기 지역 안내용 — profile.py 의 한글 미러 참고) 나머지는 보관만 한다.
     """
-    context = RespondRequestContext(session_id, None, input_meta or {}, tts, llm)
-    session = await session_repository.ensure(context.session_id)
-    session_id = session["session_id"]
-
-    # "인식 시작" 알림을 먼저 보내고, Document Intelligence 로 텍스트/대화를 추출
-    yield sse(ocr_processing_event(session_id))
-    result = await services.document.extract(context.image, context.sender_names,
-                                             profile=context.ocr_profile)
-    conversation = result.get("conversation") or []
-    user_text = (result.get("user_text") or "").strip()
-
-    # 세션에는 원본 base64 를 빼고 저장한다 (Cosmos 문서 크기 한도·비용 보호)
-    slim_image = {k: v for k, v in context.image.items() if k != "data"}
-    stored_meta = {**context.input_meta, "image": slim_image}
-
-    if result.get("status") != "completed" or not user_text:
-        # OCR 실패 또는 쓸 텍스트 없음: 실패 이벤트 + 재입력 요청을 명시적으로 보낸다
-        if result.get("status") == "completed":
-            # kakao: "나" 발화가 없음 / generic: 이미지에서 텍스트를 못 찾음
-            reason = "no_user_messages" if context.ocr_profile == "kakao" else "no_text_found"
-            result = {**result, "status": reason}
-        await session_repository.append_turn(session_id, ocr_failed_turn(stored_meta, result, tts))
-        yield sse(ocr_result_event(session_id, result))
-        yield sse(input_required_event(session_id, result.get("status") or "ocr_failed",
-                                       INPUT_REQUIRED_OCR_MESSAGE))
-        yield sse(done_event(session_id))
-        return
-
-    # OCR 성공: 해석 결과를 입력 기록에 남기고 이벤트로 프론트에 전달
-    ocr_meta = {**(stored_meta.get("ocr") or {}), "profile": context.ocr_profile}
-    if conversation:
-        ocr_meta["conversation"] = conversation  # kakao 프로파일: 대화 로그 보존
-    stored_meta["ocr"] = ocr_meta
-    yield sse(ocr_result_event(session_id, result))
-    # [progress] 1단계(extract) 완료 신고: 이미지 → 텍스트(OCR) 변환이 끝났다 (STT 흐름과 대칭).
-    yield sse(progress_event(session_id, "extract", stage_plan(extracted=True, tts=tts)))
-    async for event in respond_stream(user_text, session_id, stored_meta, tts, llm,
-                                      extracted=True, user_id=user_id):
-        yield event
-
-
-async def input_pending_stream(session_id=None, input_meta=None, tts=None):
-    """텍스트도 오디오도 없는 요청: "입력을 보내달라"는 안내만 보내고 끝낸다."""
-    session = await session_repository.ensure(session_id)
-    session_id = session["session_id"]
-    input_meta = input_meta or {}
-    await session_repository.append_turn(session_id, input_pending_turn(input_meta, tts))
-    snap = await session_repository.snapshot(session_id)
-
-    yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts))
-    yield sse(input_required_event(session_id, "text_required", INPUT_REQUIRED_TEXT_MESSAGE))
-    yield sse(done_event(session_id))
+    nickname: str | None = None
+    location: dict[str, Any] | None = None           # {"sido": 시도, "sigungu": 시군구|null}
+    emergency_contact: dict[str, Any] | None = None  # 비상 연락처 (동의 플래그 포함)
+    survey: dict[str, Any] | None = None             # 사전 설문 문항 응답들
+    privacy: dict[str, Any] | None = None            # 약관/민감정보/위치 동의 플래그들
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# [구획 5] respond_stream — 핵심 흐름 (이 서비스의 심장)
+# [구획 2] 인증 — "이 요청을 처리해도 되는가"
 #
-#   1. 세션(대화방) 확보 + 최근 대화 기록 로드
-#   2. 안전검사 / 인지왜곡 분류 / 참고자료 검색 — 3가지를 동시에 실행
-#   3. 분류 결과로 응답 정책 결정 (policy.resolve)
-#   4. 위기 발화면: LLM 을 부르지 않고 고정 위기 메시지 + 핫라인 출력 후 종료
-#   5. 평상시: 참고자료 정렬 → 프롬프트 구성 → LLM 답변을 글자 단위로 스트리밍
-#   6. (옵션) 답변을 음성으로 합성 → 대화 기록 저장 → done
+# 아래 [구획 3]의 모든 /v1 주소가 require_api_key + current_user 를 통과해야 실행된다.
+# 두 가지 모드를 환경변수 AUTH_MODE 로 고른다:
+#   api_key(기본)  x-api-key 헤더 검사, current_user 는 "anonymous"
+#   entra          Microsoft Entra External ID 의 JWT(Bearer) 검증 → user_id 반환
+# entra 코드는 이미 구현돼 있고 잠들어 있다 — 아래 4개 환경변수만 채우고
+# AUTH_MODE=entra 로 바꾸면 즉시 게이트로 작동한다 (.env.example 참고).
 # ══════════════════════════════════════════════════════════════════════════
 
-async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, llm=None,
-                         extracted: bool = False, user_id: str | None = None):
-    """상담 한 턴의 핵심 흐름.
+async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+    """임시 인증: 설정(API_KEY_REQUIRED=true)이 켜져 있으면 x-api-key 헤더를 검사.
 
-    extracted: 앞에서 STT/OCR 변환(extract 단계)을 이미 거쳤다는 뜻 — progress 신호의
-               단계 계획(seq/total)에 그 단계를 포함시킨다.
-    user_id:   요청자 식별자 (api/v1.py current_user — 가상 ID 또는 Entra oid).
-               위기 분기에서 프로필에 저장된 지역(설문 location)으로 핫라인을 찾을 때 쓴다.
+    Header(default=None) = 요청 헤더에서 x-api-key 값을 꺼내 매개변수로 받는다는 뜻.
+    키가 틀리면 401(인증 실패)을 던져서 요청 처리가 여기서 멈춘다.
+    entra 모드로 넘어가면 require_api_key 는 서버-서버 내부 호출용으로만 남기거나 제거한다.
     """
-    # 1) 세션 확보 + 최근 대화 로드 (LLM 이 맥락을 이어가도록 이전 발화들을 가져온다)
-    session = await session_repository.ensure(session_id)
-    session_id = session["session_id"]
-    prior_messages = await session_repository.recent_llm_messages(session_id)
-    input_meta = default_text_input_meta(input_meta)
+    if settings.API_KEY_REQUIRED and x_api_key != settings.API_KEY:
+        raise HTTPException(401, "invalid api key")
 
-    # [progress] 이 요청이 거칠 단계 계획을 세운다 (위기 여부는 분석 전이라 아직 모름 —
-    # 평상시 기준. 위기로 확정되면 아래 4)에서 위기 경로 기준으로 다시 계산한다).
-    # "상담 문장 접수" 단계 완료: 텍스트가 확정됐고 대화방이 준비됐다.
-    plan = stage_plan(extracted, tts)
-    yield sse(progress_event(session_id, "input", plan))
 
-    # 2) [선행 필터] 분류기를 부르기 "전에", 단독 발화를 분류할지 병합문을 분류할지
-    #    미리 결정한다 — 세션은 이미 로드돼 있어(1번) 직전 라벨 확인은 비용 0 이고,
-    #    novelty 게이트는 순수 문자열 규칙이라 모델 없이 돈다. 그 결과 분류기 호출은
-    #    어떤 턴에서도 정확히 1회다 (이전 twopass 는 불충분 턴마다 2회 → CPU 병목).
-    #    트리거: ① 직전 사용자 턴이 '불충분' (clarify 재발화 — 수렴 케이스)
-    #            ② 현재 발화가 단문(≤SHORT_CHARS) — 불충분의 길이 프록시. 파편이 처음
-    #               나온 턴(직전=확신 왜곡)을 ①이 못 잡는 구멍을 메운다
-    #    병합 조건: 트리거 발동 + novelty 게이트 통과("실제 포함된 맥락" 기준 —
-    #    화제 전환이면 병합 포기, 직전 왜곡으로 끌려가는 오염 방지).
-    #    analysis = 이 과정의 관측 기록 (meta 이벤트·세션 저장으로 나감).
-    analysis = {"context_merged": False, "merge_rejected_by": None,
-                "merge_trigger": None, "ladder_step": 0}
-    classify_input = text
-    if settings.CLASSIFY_PREMERGE and settings.CLASSIFY_CONTEXT_MAX_TURNS > 0:
-        turns_hist = session.get("turns") or []
-        window = context_merge.recent_user_texts(turns_hist)
-        if window:
-            trigger = None
-            if context_merge.last_user_label(turns_hist) == "불충분":
-                trigger = "prev_insufficient"
-            elif 0 < settings.CLASSIFY_PREMERGE_SHORT_CHARS >= len(text.strip()):
-                trigger = "short_utterance"
-            if trigger:
-                merged, included = context_merge.merge_candidate(
-                    window, text, settings.CLASSIFY_CONTEXT_MAX_TURNS,
-                    settings.CLASSIFY_CONTEXT_MAX_CHARS)
-                if merged != text:
-                    if context_merge.novelty(text, included):
-                        analysis["merge_rejected_by"] = "novelty"  # 화제 전환 — 단독 분류 유지
-                    else:
-                        classify_input = merged
-                        analysis["context_merged"] = True
-                        analysis["merge_trigger"] = trigger
+class EntraTokenVerifier:
+    """Microsoft Entra External ID(OIDC) JWT 검증기.
 
-    # 3) 세 가지 분석을 "동시에" 실행 — gather 는 병렬 실행 후 셋 다 끝나면 결과를 준다.
-    #    safety 와 RAG 는 언제나 "현재 발화만" 본다 (안전 배리어는 매 턴 독립이어야 하고,
-    #    검색은 이번 발화의 주제로 해야 맞다). 분류만 선행 필터가 고른 입력을 쓴다.
-    safety, cls, cands = await asyncio.gather(
-        services.safety.check(text),                       # 위험(자살/자해) 발화인지 — 항상 원문
-        services.classifier.classify_one(classify_input),  # 12분류 — 단독문 또는 병합문, 1회
-        services.retriever.retrieve(text),                 # 상담기법 검색(RAG) — 항상 원문
-    )
+    JWKS(서명키) 주소는 하드코딩하지 않고 OIDC 메타데이터에서 읽는다
+    (issuer 뒤에 /discovery/v2.0/keys 를 그대로 붙이면 404 가 나는 함정 회피).
+    PyJWKClient 가 서명키를 캐시하므로 매 요청 네트워크 호출이 없다.
+    무거운 의존성(PyJWT)은 이 클래스가 실제로 만들어질 때만 import 한다
+    → api_key 모드에서는 PyJWT 가 없어도 서버가 뜬다.
+    """
 
-    # [progress] "동시 분석" 단계 완료: 분류가 확정됐다 (선행 필터가 고른 입력 기준).
-    yield sse(progress_event(session_id, "analyze", plan))
-    primary = cls["primary"]  # 대표 라벨 (예: "흑백 사고") — 병합문을 분류했다면 그 결과
-    # 대표 라벨의 확신 점수를 찾는다 (라벨 목록에서 primary 와 같은 항목의 score)
-    confidence = max((l["score"] for l in cls["labels"] if l["label"] == primary), default=0.0)
+    def __init__(self) -> None:
+        import jwt  # PyJWT[crypto] — entra 모드에서만 필요
 
-    # 4) [완화 사다리 단계] 최종 라벨이 '불충분'이면 "몇 번째 연속 불충분인지"를 센다.
-    #    이 숫자로 policy.resolve 가 질문의 각도·무게를 바꾸고, ESCAPE_AFTER(기본 4)째는
-    #    질문을 멈추는 수용·동행 모드로 전환한다 (4연속 ≈ 발화 회피 신호라는 실측 근거).
-    #    INSUFFICIENT_ESCAPE_AFTER=0 은 사다리 전체 끔 (0=꺼짐 관례 — POLICY_MIN_CONFIDENCE 와 동일).
-    if primary == "불충분" and settings.INSUFFICIENT_ESCAPE_AFTER > 0:
-        analysis["ladder_step"] = context_merge.trailing_insufficient(session.get("turns") or []) + 1
+        self._jwt = jwt
+        tenant = settings.ENTRA_TENANT_ID
+        self.audience = settings.ENTRA_CLIENT_ID
+        # issuer 를 안 주면 테넌트 GUID 로 CIAM 기본 형태를 만든다 (필요 시 명시 override)
+        self.issuer = settings.ENTRA_ISSUER or (
+            f"https://{tenant}.ciamlogin.com/{tenant}/v2.0" if tenant else "")
+        missing = [n for n, v in {"ENTRA_CLIENT_ID": self.audience,
+                                  "ENTRA_ISSUER(or ENTRA_TENANT_ID)": self.issuer}.items() if not v]
+        if missing:
+            raise ValueError("entra auth missing env vars: " + ", ".join(missing))
 
-    # 5) 이번 턴을 어떻게 응답할지 정책 결정 — 규칙은 respond/policy.py [구획 1]에서 편집
-    policy = respond_policy.resolve(safety, cls, ladder_step=analysis["ladder_step"])
+        # OIDC 메타데이터에서 jwks_uri 를 읽어 서명키 클라이언트를 1회 생성
+        meta_url = self.issuer.rstrip("/") + "/.well-known/openid-configuration"
+        jwks_uri = httpx.get(meta_url, timeout=10).raise_for_status().json()["jwks_uri"]
+        self._jwks = jwt.PyJWKClient(jwks_uri)
 
-    # 사용자 발화를 대화 기록에 저장하고, 분류 결과를 meta 이벤트로 프론트에 먼저 알린다
-    # (저장하는 primary 는 병합 분류까지 끝난 "최종" 라벨 — 다음 턴의 선행 필터·사다리가
-    #  이 값을 본다. analysis 를 사용자 턴에도 남겨야 "병합으로 얻은 라벨"을 원발화 라벨과
-    #  구분해 집계·재학습 추출에서 걸러낼 수 있다 — 위기·빈 답변 턴도 기록이 남도록 여기서 저장)
-    # 멀티라벨 선택 결과 전체를 세션에 남긴다 — 학습 데이터가 최대 4개 동시 라벨까지
-    # 포함하므로 primary 만 저장하면 동시 왜곡 정보가 유실된다 (재현 지적, 2026-07-04)
-    selected_labels = [{"label": l["label"], "score": round(float(l.get("score", 0.0)), 4)}
-                       for l in sorted(cls["labels"], key=lambda l: -float(l.get("score", 0.0)))
-                       if l.get("selected")]
-    await session_repository.append_turn(
-        session_id, user_turn(text, primary, safety, input_meta, tts,
-                              analysis=analysis, selected_labels=selected_labels))
-    snap = await session_repository.snapshot(session_id)
-    yield sse(meta_event(session_id, snap["turn_count"], input_meta, tts, cls, analysis))
+    def verify(self, token: str) -> str:
+        """토큰 서명·issuer·audience·만료를 검증하고 user_id(oid 우선, 없으면 sub)를 반환."""
+        signing_key = self._jwks.get_signing_key_from_jwt(token).key
+        claims = self._jwt.decode(token, signing_key, algorithms=["RS256"],
+                                  audience=self.audience, issuer=self.issuer)
+        return claims.get("oid") or claims.get("sub") or "unknown"
 
-    # 4) 위기 분기: LLM 답변 생성 없이 고정 메시지 + 상담 핫라인을 즉시 출력하고 종료
-    #    지역(시도)이 정해지고 지역 연락처 DB 가 켜져 있으면 지역 창구를 전국 공통 앞에 붙인다.
-    #    region 은 metadata.region(프론트 명시) → 프로필(설문 저장 지역) 순으로 정한다.
-    #    user_id 배선 완료: 가상 ID/oid 가 route → 여기까지 전달돼 프로필 경로가 살아 있다.
-    #    resolve_region 은 프로필 조회(DB) 때문에 블로킹일 수 있어 to_thread 로 오프로딩.
-    if policy.is_crisis:
-        # [progress] 위기 확정 — LLM 생성(generate) 단계가 빠진 위기 경로 계획으로
-        # 갱신하고 "방침 결정" 완료를 신고한다. (여기서부터 total 이 1 줄어드는 이유 —
-        # 프론트는 곧이어 오는 crisis 이벤트로 위기 화면으로 전환하므로 실용상 무해)
-        plan = stage_plan(extracted, tts, crisis=True)
-        yield sse(progress_event(session_id, "route", plan))
-        region, district = await asyncio.to_thread(
-            respond_policy.resolve_region, input_meta, user_id)
-        payload = await respond_policy.crisis_payload(
-            reason=safety.get("reason"), region=region, district=district)
-        yield sse(payload)
-        await session_repository.append_turn(session_id, crisis_turn(payload))
-        if tts and tts.get("enabled"):
-            yield sse(tts_event(session_id, await services.speech.synthesize_tts(payload.get("message", ""), tts)))
-            # [progress] "음성 합성" 단계 완료 (위기 안내문의 TTS).
-            yield sse(progress_event(session_id, "speak", plan))
-        yield sse(done_event(session_id))
-        return
 
-    # 5) 참고자료 선별([구획 3]) → 프롬프트 구성(policy [구획 2]) → LLM 스트리밍
-    #    정책이 RAG 를 끄면(chunks=[]) 참고자료 없이 답변한다
-    chunks = select_chunks(cands, top_n=policy.rag_top_n) if policy.use_rag else []
-    yield sse(chunks_event(session_id, chunks))
+_verifier: EntraTokenVerifier | None = None
 
-    # [멀티라벨 보조 지침] 분류기가 primary 와 "함께 선택한"(selected=True) 부차 왜곡들.
-    # threshold(0.55) 이상 왜곡이 여러 개면 주 지침 하나만으로는 관찰된 패턴을 다 못
-    # 담으므로, score 순으로 상한(LABEL_GUIDANCE_MAX-1)까지 보조 지침으로 병기한다.
-    # 정상/불충분은 selection_policy 가 배타 처리하므로 여기 걸릴 일이 없지만 한 번 더 거른다.
-    secondary_labels: list[str] = []
-    if policy.prompt_strategy == "cbt_label_guided" and settings.LABEL_GUIDANCE_MAX > 1:
-        secondary_labels = [l["label"] for l in
-                            sorted(cls["labels"], key=lambda l: -float(l.get("score", 0.0)))
-                            if l.get("selected") and l["label"] not in ("정상", "불충분", primary)
-                            ][: settings.LABEL_GUIDANCE_MAX - 1]
 
-    # 시스템 프롬프트(상담 스타일·라벨 지침) + 이전 대화 + 이번 발화 → LLM 입력 메시지
-    messages = respond_policy.build_llm_messages(policy.prompt_strategy, primary, chunks,
-                                                 prior_messages, text,
-                                                 secondary_labels=secondary_labels)
-    # [progress] "응답 방침 결정" 단계 완료: 정책 라우팅 + 프롬프트 구성까지 끝났다.
-    # 다음 이벤트부터 LLM 답변 조각(token)이 흘러온다 — 프론트는 여기서 로딩 표시를
-    # "답변 작성 중"으로 바꾸면 자연스럽다.
-    yield sse(progress_event(session_id, "route", plan))
-    assistant_parts: list[str] = []
-    # LLM 이 글자를 생성하는 대로 token 이벤트로 즉시 내보낸다 (타자 치듯 보이는 효과)
-    async for tok in services.llm.chat_stream_async(messages, llm):
-        assistant_parts.append(tok)
-        yield sse(token_event(session_id, tok))
-    # [progress] "답변 생성" 단계 완료: 스트리밍이라 생성 = 전송이므로, 이 신호가
-    # 곧 "텍스트 송신 완료"이기도 하다 (별도 송신 단계를 두지 않는 이유).
-    yield sse(progress_event(session_id, "generate", plan))
+def _get_verifier() -> EntraTokenVerifier:
+    """검증기를 첫 entra 요청 때 1회 생성해 재사용 (테스트는 이 전역을 가짜로 교체)."""
+    global _verifier
+    if _verifier is None:
+        _verifier = EntraTokenVerifier()
+    return _verifier
 
-    # 조각들을 합쳐 완성된 답변을 만들고, 어떤 정책·확신으로 생성했는지와 함께 저장
-    # (confidence 를 남겨야 운영 후 "저확신 강등이 몇 번 일어났나"를 DB 에서 집계할 수 있다)
-    assistant_text = "".join(assistant_parts).strip()
-    if assistant_text:
-        # analysis(병합·사다리 관측 필드)도 함께 저장 — 운영 후 "병합이 몇 번 발동했고
-        # 사다리가 어디까지 갔나"를 세션 DB 에서 집계하기 위해서다.
-        # secondary_labels 는 보조 지침이 실제로 주입된 턴에만 남긴다 (있을 때만 기록).
-        policy_meta = {**policy.as_metadata(), "confidence": round(confidence, 4), **analysis}
-        if secondary_labels:
-            policy_meta["secondary_labels"] = secondary_labels
-        await session_repository.append_turn(
-            session_id, assistant_turn(assistant_text, primary, chunks, policy=policy_meta))
 
-    # 6) (옵션) 음성 합성 — 문장이 완성된 뒤에 해야 자연스러워서 스트리밍이 끝난 후 수행
-    if tts and tts.get("enabled"):
-        yield sse(tts_event(session_id, await services.speech.synthesize_tts(assistant_text, tts)))
-        # [progress] "음성 합성" 단계 완료 — 마지막 단계라 이 직후 done 이 온다.
-        yield sse(progress_event(session_id, "speak", plan))
+def _bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "missing bearer token")
+    return authorization.split(" ", 1)[1].strip()
 
-    yield sse(done_event(session_id))
+
+# 가상 ID(x-user-id) 허용 형식: 영문/숫자/일부 기호, 최대 64자.
+# UUID 가 대표 사용처지만 형식을 UUID 로 못박지는 않는다 (테스트용 짧은 ID 허용).
+_VIRTUAL_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+
+async def current_user(authorization: str | None = Header(default=None),
+                       x_user_id: str | None = Header(default=None)) -> str:
+    """요청한 사용자의 user_id 를 반환.
+
+    ── 가구현 로그인 (api_key 모드, 현행) ─────────────────────────────────
+    정식 로그인 전까지는 프론트엔드가 "가상 ID"를 발급·보관하고 매 요청의
+    x-user-id 헤더로 보낸다 (프론트: UUID 를 만들어 세션/저장소에 저장 후 재사용).
+    - 헤더가 있으면 그 값이 곧 user_id — 프로필/설문/위기 지역 안내가 사용자별로 동작.
+    - 헤더가 없으면 기존과 동일하게 "anonymous" (하위 호환 — 이전 프론트도 그대로 동작).
+    - 형식이 틀리면 400 으로 명확히 거절한다 (조용히 anonymous 로 강등하면 프로필이
+      엉뚱한 계정에 저장되는 사고를 늦게 발견하게 되므로).
+    ⚠️ 가상 ID 는 "식별"이지 "인증"이 아니다 — 헤더를 아는 사람은 그 프로필을 읽을 수
+    있다. 민감정보 보호가 필요해지는 시점에 아래 entra 모드로 전환한다.
+
+    ── entra 모드 (정식 로그인, 구현 완료·잠들어 있음) ─────────────────────
+    Authorization: Bearer <JWT> 를 검증해 user_id(oid) 를 돌려준다. 이때 x-user-id
+    헤더는 무시된다 — 같은 자리(user_id)에 가상 ID 대신 실제 oid 가 꽂히므로,
+    프로필·세션·지역 안내 코드는 한 줄도 바꾸지 않고 정식 로그인으로 전환된다.
+    검증(서명·issuer·audience·만료)은 블로킹이라 to_thread 로 오프로딩한다.
+
+    ── [남은 작업 — 세션을 user_id 로 스코프] ──────────────────────────────
+    프로필(/v1/profile*)과 위기 지역 안내는 user_id 배선이 끝났다. 세션까지
+    "내 세션만 접근"을 원하면: sessions 라우트에서 이 값을 받아 session.py 저장소가
+    user_id 필드를 갖도록 확장한다 (데이터 모델 변경이라 기존 익명 세션과의 호환을
+    정하고 진행).
+    ─────────────────────────────────────────────────────────────────────
+    """
+    if settings.AUTH_MODE != "entra":
+        virtual_id = (x_user_id or "").strip()
+        if not virtual_id:
+            return "anonymous"
+        if not _VIRTUAL_ID_RE.match(virtual_id):
+            raise HTTPException(400, "invalid x-user-id (allowed: A-Z a-z 0-9 _ . - , max 64)")
+        return virtual_id
+
+    token = _bearer_token(authorization)  # 없으면 401
+    try:
+        verifier = _get_verifier()        # 설정 누락이면 ValueError → 500(서버 오설정)
+    except ValueError as exc:
+        raise HTTPException(500, f"entra auth misconfigured: {exc}")
+    try:
+        return await asyncio.to_thread(verifier.verify, token)
+    except Exception:                     # 서명 불일치·만료·aud/iss 불일치 등
+        raise HTTPException(401, "invalid or expired token")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# [구획 3] 라우트 — 이 서버가 받는 모든 요청 주소(엔드포인트)
+#
+# 각 함수는 "요청을 받아서 → 알맞은 담당 모듈에 넘기는" 역할만 한다.
+# 상담 로직은 respond/flow.py, 외부 Azure 호출은 services/ 에 있다.
+# ══════════════════════════════════════════════════════════════════════════
+
+router = APIRouter()
+# /v1/* 주소는 전부 인증을 거친다. Depends(...) = "이 함수를 먼저 통과해야 함"
+v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key), Depends(current_user)])
+
+
+@router.get("/healthz")
+async def healthz():
+    """서버 생존 확인용. Azure 가 주기적으로 호출해 서버가 살아있는지 본다."""
+    return {"status": "ok"}
+
+
+@v1.post("/classify")
+async def classify(body: ClassifyIn):
+    """문장 1개를 인지왜곡 분류기(cogdist)에 보내 라벨을 받는다."""
+    return await services.classifier.classify_one(body.text, body.threshold)
+
+
+@v1.post("/batch-classify")
+async def batch_classify(body: BatchClassifyIn):
+    """문장 여러 개를 한 번에 분류한다 (데이터 검증용)."""
+    return await services.classifier.classify_batch(body.texts, body.threshold)
+
+
+@v1.post("/respond")
+async def respond(body: RespondIn, user_id: str = Depends(current_user)):
+    """상담 응답 생성 — 이 서비스의 핵심 주소.
+
+    입력 형태(이미지/음성/텍스트/빈 입력)에 따라 네 가지 흐름 중 하나로 보낸다.
+    응답은 한 번에 주지 않고 SSE 스트리밍(생성되는 대로 조각조각 전송)으로 보낸다
+    — 그래서 반환값이 일반 JSON 이 아니라 StreamingResponse 다.
+
+    user_id: 위기 분기에서 프로필(설문에 저장된 지역)로 지역 핫라인을 찾을 때 쓴다.
+    metadata.region 이 오면 그쪽이 우선 (respond/policy.py resolve_region 참고).
+    """
+    context = RespondRequestContext.from_body(body)  # 요청을 내부 형태로 정리
+
+    if context.requires_ocr:
+        # 채팅 캡쳐 이미지만 왔음 → OCR(Document Intelligence) 후 상담 흐름으로
+        stream = flow.ocr_then_respond_stream(
+            context.session_id, context.input_meta, context.tts, context.llm, user_id=user_id)
+    elif context.requires_stt:
+        # 오디오만 왔음 → 먼저 음성→텍스트(STT) 변환 후 상담 흐름으로
+        stream = flow.stt_then_respond_stream(
+            context.session_id, context.input_meta, context.tts, context.llm, user_id=user_id)
+    elif not context.has_text:
+        # 텍스트도 오디오도 없음 → "입력을 보내달라"는 안내만 반환 (위기 분기 없음 → user_id 불필요)
+        stream = flow.input_pending_stream(context.session_id, context.input_meta, context.tts)
+    else:
+        # 일반 텍스트 상담
+        stream = flow.respond_stream(
+            context.text or "", context.session_id, context.input_meta, context.tts, context.llm,
+            user_id=user_id)
+
+    return StreamingResponse(stream, media_type="text/event-stream")
+
+
+# ── 프로필 (가구현 로그인과 짝) — 저장 규칙은 app/profile.py, 가상 ID 는 [구획 2] 참고 ──
+
+@v1.get("/profile")
+async def get_profile(user_id: str = Depends(current_user)):
+    """내(x-user-id) 프로필 조회. 없으면 404 — 프론트 로그인 페이지는 404 를 받으면
+    POST /v1/profile 로 새로 만든다 (get_profile() or create_profile() 패턴)."""
+    prof = await asyncio.to_thread(profile_repository.get, user_id)
+    if prof is None:
+        raise HTTPException(404, "profile not found")
+    return prof
+
+
+@v1.post("/profile")
+async def create_profile(user_id: str = Depends(current_user)):
+    """프로필 생성. 이미 있으면 그대로 반환 (여러 번 눌러도 안전 — 멱등)."""
+    return await asyncio.to_thread(profile_repository.ensure, user_id)
+
+
+@v1.post("/profile/survey")
+async def submit_survey(body: SurveyIn, user_id: str = Depends(current_user)):
+    """설문 저장 → survey_completed=True 로 완료 표시된 프로필을 돌려준다.
+
+    location.sido/sigungu 는 한글 필드(시도/시군구)로 미러 저장되어, 이후 위기 발화 시
+    metadata.region 없이도 프로필 지역으로 가까운 상담 창구를 안내한다.
+    """
+    payload = body.model_dump(exclude_none=True)
+    return await asyncio.to_thread(profile_repository.save_survey, user_id, payload)
+
+
+@v1.post("/sessions")
+async def create_session(body: SessionCreateIn | None = None):
+    """새 대화 세션(대화방)을 만든다. session_id 를 안 주면 서버가 발급."""
+    return await session_repository.create(body.session_id if body else None)
+
+
+@v1.get("/sessions")
+async def list_sessions(user_id: str = Depends(current_user)):
+    """현재 로그인한 사용자(user_id)의 세션 목록(요약)을 최신순으로 반환한다.
+    user_id 가 없는 옛날 세션(가상 ID 도입 이전에 만들어진 익명 세션)은 이 목록에
+    안 잡힌다 — 그런 세션은 여전히 GET /v1/sessions/{session_id}로 직접 조회 가능."""
+    return await session_repository.list_for_user(user_id)
+
+
+@v1.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    """세션의 저장된 대화 기록을 조회한다. 없으면 404."""
+    state = await session_repository.snapshot(session_id)
+    if state is None:
+        raise HTTPException(404, "session not found")
+    return state
+
+
+@v1.get("/sessions/{session_id}/turns/{turn_index}/explain")
+async def explain_turn(session_id: str, turn_index: int, label: str | None = None):
+    """특정 세션의 특정 턴 원문을 Cosmos에서 가져와 SHAP 토큰 기여도를 계산한다.
+
+    turn_index 는 GET /v1/sessions/{session_id} 응답의 turns 배열 인덱스(0부터)와 동일하다.
+    캐싱 없음 — 호출할 때마다(대시보드의 "연산 과정 보기" 버튼 클릭 시) 매번 새로 계산한다.
+    label 을 생략하면 그 턴의 primary 라벨 기준으로 설명한다.
+
+    주의(컨텍스트 병합 도입 이후): analysis.context_merged=true 인 턴은
+    분류가 "원문 단독"이 아니라 "직전 발화와 합친 문장"으로 이뤄졌다 — 병합된 문장
+    자체는 세션에 저장되지 않으므로, 여기서는 원문(text)만으로 SHAP을 계산한다.
+    그 결과 이 턴은 SHAP 결과가 실제 분류 근거와 다르게 보일 수 있어 context_merged
+    플래그를 함께 내려준다 (API_CONTRACT.md §14 참고 — 프론트는 이 값으로 경고 표시).
+    """
+    state = await session_repository.snapshot(session_id)
+    if state is None:
+        raise HTTPException(404, "session not found")
+    turns = state.get("turns", [])
+    if turn_index < 0 or turn_index >= len(turns):
+        raise HTTPException(404, "turn not found")
+    turn = turns[turn_index]
+    text = (turn.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "turn has no text to explain")
+    result = await services.classifier.explain_text(text, label)
+    analysis = turn.get("analysis") or {}
+    result["context_merged"] = bool(analysis.get("context_merged"))
+    result["merge_trigger"] = analysis.get("merge_trigger")
+    return result
+
+
+router.include_router(v1)
