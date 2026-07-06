@@ -8,6 +8,7 @@ azure-cognitiveservices-speech>=1.38.0
 pydub>=0.25.1
 azure-cosmos>=4.7.0
 azure-monitor-opentelemetry
+opentelemetry-instrumentation-httpx
 azure-ai-documentintelligence>=1.0.0
 PyJWT[crypto]>=2.8.0
 transformers>=4.40
