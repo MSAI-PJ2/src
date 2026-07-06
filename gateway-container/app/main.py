@@ -27,6 +27,11 @@ if os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING"):
     try:
         from azure.monitor.opentelemetry import configure_azure_monitor
         configure_azure_monitor()
+        # httpx 계측 등록 — 기본 계측 목록에 httpx 가 빠져 있어서, httpx 로 나가는
+        # 호출(분류기 cogdist, Azure OpenAI)이 앱 맵·의존성 추적에 안 잡힌다.
+        # 아래 두 줄이 httpx 를 추적 대상에 등록해 전체 호출 흐름이 보이게 한다.
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        HTTPXClientInstrumentor().instrument()
     except Exception as exc:  # 모니터링이 실패해도 서버 기동을 막으면 안 된다
         logging.getLogger(__name__).warning("App Insights 초기화 실패(기동 계속): %s", exc)
 
