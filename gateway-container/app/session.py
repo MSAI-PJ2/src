@@ -85,6 +85,16 @@ def clean_session_name(value: str | None) -> str | None:
     return collapsed[:_SESSION_NAME_MAX] or None
 
 
+# 새 세션의 중립 초기 이름. 세션 내용(첫 발화 등)을 라벨로 노출하지 않으려는 의도 —
+# 상담 도메인이라 민감할 수 있어, 이름은 사용자가 직접 붙이기 전까지 고정 중립값으로 둔다.
+# 프론트는 여기에 session_id 뒤 4~6자를 붙여 구분한다(예: "새 대화 · 3f9c").
+_DEFAULT_SESSION_NAME = "새 대화"
+
+def default_session_name() -> str:
+    """새 세션에 붙는 중립 초기 이름. (내용 기반 아님 — 민감정보 노출 방지)"""
+    return _DEFAULT_SESSION_NAME
+
+
 def turns_to_llm_messages(turns: list[dict[str, Any]]) -> list[dict[str, str]]:
     """저장된 턴들 → LLM 이 이해하는 대화 형식([{role, content}, ...])으로 변환.
 
@@ -107,7 +117,7 @@ _sessions: dict[str, dict[str, Any]] = {}
 def _new_item(sid: str) -> dict[str, Any]:
     now = now_ts()
     return {"session_id": sid, "updated_ts": now, "created_at": iso(now), "updated_at": iso(now),
-            "turns": [], "user_id": None, "name": None}
+            "turns": [], "user_id": None, "name": default_session_name()}
 
 
 def _prune_locked() -> None:
@@ -200,7 +210,8 @@ class InMemorySessionRepository:
                 return None
             if user_id and item.get("user_id") and item["user_id"] != user_id:
                 return None
-            item["name"] = clean_session_name(name)
+            # 빈 값으로 지우면 None 이 아니라 중립 기본값으로 복귀 — 항상 이름이 있게(코드 노출 방지)
+            item["name"] = clean_session_name(name) or default_session_name()
             item["updated_ts"] = now_ts()
             item["updated_at"] = iso(item["updated_ts"])
             return _snapshot_locked(sid)
@@ -263,8 +274,8 @@ class CosmosSessionRepository:
 
     def _new_doc(self, sid: str, user_id: str | None = None) -> dict[str, Any]:
         now = now_ts()
-        item = {"id": sid, "session_id": sid, "user_id": user_id, "name": None, "updated_ts": now,
-                "created_at": iso(now), "updated_at": iso(now), "turns": []}
+        item = {"id": sid, "session_id": sid, "user_id": user_id, "name": default_session_name(),
+                "updated_ts": now, "created_at": iso(now), "updated_at": iso(now), "turns": []}
         if settings.SESSION_TTL_SECONDS > 0:
             item["ttl"] = settings.SESSION_TTL_SECONDS
         return item
@@ -337,7 +348,7 @@ class CosmosSessionRepository:
         sid = valid_session_id(session_id)
         if not sid:
             return None
-        cleaned = clean_session_name(name)
+        cleaned = clean_session_name(name) or default_session_name()  # 빈 값 → 중립 기본값 복귀
         for _ in range(4):  # append 와 동일한 etag 조건부 쓰기 + 충돌 재시도
             item = self._read(sid)
             if item is None:
