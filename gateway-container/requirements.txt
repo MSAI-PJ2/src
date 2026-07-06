@@ -14,3 +14,4 @@ transformers>=4.40
 safetensors
 numpy
 shap>=0.45
+torch
