@@ -460,10 +460,13 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     # 그 화자-라벨 맥락으로 분류한다(상대방=맥락, 나=진단 대상) — 세션 선행 필터는 건너뛴다
     # (이미지가 자체 맥락을 가지므로 이중 병합 방지). 저장·safety·RAG 입력은 그대로 text('나'만) — 블랙박스.
     classify_input = text
+    ocr_context = None  # [옵션2·선택적] 카톡 상대방 맥락 분류 입력 — 단독이 '불충분'일 때만 폴백에 쓴다
     if classify_text:
-        classify_input = classify_text
-        analysis["context_merged"] = True
-        analysis["merge_trigger"] = "ocr_conversation"
+        # [선택적 맥락] 예전엔 kakao 를 항상 맥락(상대방+나)으로 분류했으나, 명확한 왜곡이
+        # 위로성 맥락에 희석돼 '정상'으로 뒤집히는 손해가 실측으로 컸다(발표불안 케이스 등).
+        # → 먼저 '나' 발화 단독으로 분류하고(gather 는 text 그대로), 결과가 '불충분'(애매)일
+        #   때만 상대방 맥락으로 재분류한다(폴백은 gather 뒤). 명확한 왜곡은 폴백을 안 타므로 손해 없음.
+        ocr_context = classify_text
     elif settings.CLASSIFY_PREMERGE and settings.CLASSIFY_CONTEXT_MAX_TURNS > 0:
         turns_hist = session.get("turns") or []
         window = context_merge.recent_user_texts(turns_hist)
@@ -493,6 +496,16 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
         services.classifier.classify_one(classify_input),  # 12분류 — 단독문 또는 병합문, 1회
         services.retriever.retrieve(text),                 # 상담기법 검색(RAG) — 항상 원문
     )
+
+    # [옵션2 · 선택적 맥락 폴백] 카톡: '나' 발화 단독 분류가 '불충분'(애매)일 때만 상대방 발화를
+    # 맥락으로 붙여 재분류한다. 맥락이 왜곡을 살려내면(불충분 아님) 채택, 그래도 불충분이면 단독 유지.
+    # ("거봐 역시…" 처럼 단독=불충분인 짧은 발화는 맥락으로 살리고, 이미 명확한 왜곡은 손대지 않는다.)
+    if ocr_context and cls.get("primary") == "불충분":
+        cls_ctx = await services.classifier.classify_one(ocr_context)
+        if cls_ctx.get("primary") != "불충분":
+            cls = cls_ctx
+            analysis["context_merged"] = True
+            analysis["merge_trigger"] = "ocr_context_fallback"
 
     # [progress] "동시 분석" 단계 완료: 분류가 확정됐다 (선행 필터가 고른 입력 기준).
     yield sse(progress_event(session_id, "analyze", plan))
