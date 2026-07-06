@@ -38,6 +38,8 @@ class SessionRepository(Protocol):
     async def snapshot(self, session_id: str) -> dict[str, Any] | None: ...               # 현재 상태 조회
     async def recent_llm_messages(self, session_id: str, max_turns: int | None = None) -> list[dict[str, str]]: ...
     async def list_for_user(self, user_id: str) -> list[dict[str, Any]]: ...  # 이 사용자의 세션 목록(요약)
+    async def rename(self, session_id: str, name: str | None,
+                     user_id: str | None = None) -> dict[str, Any] | None: ...  # 표시 이름 설정/해제
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +67,24 @@ def new_session_id() -> str:
     return str(uuid.uuid4())  # 전 세계적으로 겹치지 않는 무작위 ID
 
 
+# 세션 표시 이름: 사용자가 대화방에 붙이는 자유 라벨. 세션 ID(코드)가 그대로 노출되지
+# 않도록 프론트가 이 이름을 보여준다(이름 없으면 preview→날짜 순으로 폴백). 프론트 표기
+# 예: "승진 발표 상담 · 3f9c"(이름 + session_id 뒤 4자). 저장 전 한 줄로 정규화한다.
+_SESSION_NAME_MAX = 60  # 목록 카드 한 줄에 들어가는 실용 상한
+
+def clean_session_name(value: str | None) -> str | None:
+    """표시 이름을 안전한 한 줄 문자열로 정리한다. 내용이 없으면 None(=이름 해제, 폴백으로 복귀).
+
+    - 제어문자 제거 + 줄바꿈·연속 공백을 단일 공백으로 축약 (목록이 한 줄로 깨지지 않게)
+    - 앞뒤 공백 제거 후 60자로 자름
+    """
+    if value is None:
+        return None
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", value)      # 제어문자 → 공백
+    collapsed = re.sub(r"\s+", " ", text).strip()        # 연속 공백/줄바꿈 → 단일 공백
+    return collapsed[:_SESSION_NAME_MAX] or None
+
+
 def turns_to_llm_messages(turns: list[dict[str, Any]]) -> list[dict[str, str]]:
     """저장된 턴들 → LLM 이 이해하는 대화 형식([{role, content}, ...])으로 변환.
 
@@ -86,8 +106,8 @@ _sessions: dict[str, dict[str, Any]] = {}
 
 def _new_item(sid: str) -> dict[str, Any]:
     now = now_ts()
-    return {"session_id": sid, "updated_ts": now,
-            "created_at": iso(now), "updated_at": iso(now), "turns": [], "user_id": None}
+    return {"session_id": sid, "updated_ts": now, "created_at": iso(now), "updated_at": iso(now),
+            "turns": [], "user_id": None, "name": None}
 
 
 def _prune_locked() -> None:
@@ -102,7 +122,7 @@ def _snapshot_locked(sid: str) -> dict[str, Any]:
     """저장된 원본이 아니라 복사본을 돌려준다 (밖에서 고쳐도 원본이 안 바뀌게)."""
     item = _sessions[sid]
     return {"session_id": sid, "created_at": item["created_at"], "updated_at": item["updated_at"],
-            "turn_count": len(item["turns"]), "turns": list(item["turns"])}
+            "turn_count": len(item["turns"]), "name": item.get("name"), "turns": list(item["turns"])}
 
 
 class InMemorySessionRepository:
@@ -161,9 +181,29 @@ class InMemorySessionRepository:
             _prune_locked()
             return [
                 {"session_id": sid, "created_at": it["created_at"], "updated_at": it["updated_at"],
-                 "turn_count": len(it["turns"]), "preview": it.get("preview", "")}
+                 "turn_count": len(it["turns"]), "preview": it.get("preview", ""),
+                 "name": it.get("name")}
                 for sid, it in _sessions.items() if it.get("user_id") == user_id
             ]
+
+    async def rename(self, session_id: str, name: str | None,
+                     user_id: str | None = None) -> dict[str, Any] | None:
+        """세션 표시 이름을 설정/변경/해제(name=None 또는 빈 문자열)한다. 세션이 없으면 None.
+
+        user_id 를 주면 소유자 확인: 다른 사용자의 세션이면 None(존재 자체를 숨기려 404 처리용).
+        """
+        sid = valid_session_id(session_id)
+        with _lock:
+            _prune_locked()
+            item = _sessions.get(sid) if sid else None
+            if item is None:
+                return None
+            if user_id and item.get("user_id") and item["user_id"] != user_id:
+                return None
+            item["name"] = clean_session_name(name)
+            item["updated_ts"] = now_ts()
+            item["updated_at"] = iso(item["updated_ts"])
+            return _snapshot_locked(sid)
 
 
 # ---------------------------------------------------------------------------
@@ -218,11 +258,12 @@ class CosmosSessionRepository:
         """DB 문서 → API 가 돌려주는 형태(snapshot)로 변환."""
         turns = list(item.get("turns") or [])
         return {"session_id": item["session_id"], "created_at": item["created_at"],
-                "updated_at": item["updated_at"], "turn_count": len(turns), "turns": turns}
+                "updated_at": item["updated_at"], "turn_count": len(turns),
+                "name": item.get("name"), "turns": turns}
 
     def _new_doc(self, sid: str, user_id: str | None = None) -> dict[str, Any]:
         now = now_ts()
-        item = {"id": sid, "session_id": sid, "user_id": user_id, "updated_ts": now,
+        item = {"id": sid, "session_id": sid, "user_id": user_id, "name": None, "updated_ts": now,
                 "created_at": iso(now), "updated_at": iso(now), "turns": []}
         if settings.SESSION_TTL_SECONDS > 0:
             item["ttl"] = settings.SESSION_TTL_SECONDS
@@ -292,6 +333,27 @@ class CosmosSessionRepository:
         item = self._read(sid)
         return self._to_snapshot(item) if item else None
 
+    def _rename_sync(self, session_id: str, name: str | None, user_id: str | None = None) -> dict[str, Any] | None:
+        sid = valid_session_id(session_id)
+        if not sid:
+            return None
+        cleaned = clean_session_name(name)
+        for _ in range(4):  # append 와 동일한 etag 조건부 쓰기 + 충돌 재시도
+            item = self._read(sid)
+            if item is None:
+                return None
+            if user_id and item.get("user_id") and item["user_id"] != user_id:
+                return None  # 남의 세션 — 존재 숨김(None)
+            item["name"] = cleaned
+            self._touch(item)
+            try:
+                self._container.replace_item(item=sid, body=item, etag=item.get("_etag"),
+                                             match_condition=self._if_not_modified)
+                return self._to_snapshot(item)
+            except self._precondition:
+                continue  # 다른 요청이 먼저 씀(412) → 최신본 기준으로 재시도
+        raise RuntimeError(f"cosmos session rename contention: {sid}")
+
     # --- SessionRepository 규격 (async) — 동기 구현을 스레드로 감싼 것 ---
 
     async def create(self, session_id: str | None = None) -> dict[str, Any]:
@@ -306,7 +368,7 @@ class CosmosSessionRepository:
     async def list_for_user(self, user_id: str) -> list[dict[str, Any]]:
         def _query():
             items = self._container.query_items(
-                query="SELECT c.session_id, c.created_at, c.updated_at, c.preview, "
+                query="SELECT c.session_id, c.created_at, c.updated_at, c.preview, c.name, "
                       "ARRAY_LENGTH(c.turns) AS turn_count "
                       "FROM c WHERE c.user_id = @uid ORDER BY c.updated_at DESC",
                 parameters=[{"name": "@uid", "value": user_id}],
@@ -317,6 +379,10 @@ class CosmosSessionRepository:
 
     async def snapshot(self, session_id: str) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._snapshot_sync, session_id)
+
+    async def rename(self, session_id: str, name: str | None,
+                     user_id: str | None = None) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._rename_sync, session_id, name, user_id)
 
     async def recent_llm_messages(self, session_id: str, max_turns: int | None = None) -> list[dict[str, str]]:
         snap = await self.snapshot(session_id)

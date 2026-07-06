@@ -138,6 +138,15 @@ class SessionCreateIn(BaseModel):
     session_id: str | None = None
 
 
+class SessionRenameIn(BaseModel):
+    """PATCH /v1/sessions/{session_id} 의 입력 — 대화방 표시 이름 설정/해제.
+
+    name 을 빈 문자열/공백/None 으로 보내면 이름을 지운다(프론트는 preview→날짜로 폴백).
+    저장 시 서버가 한 줄로 정규화하고 60자로 자른다 (session.clean_session_name).
+    """
+    name: str | None = None
+
+
 class SurveyIn(BaseModel):
     """POST /v1/profile/survey 의 입력 — 프론트 설문 페이지의 payload 와 1:1.
 
@@ -389,6 +398,20 @@ async def list_sessions(user_id: str = Depends(current_user)):
 async def get_session(session_id: str):
     """세션의 저장된 대화 기록을 조회한다. 없으면 404."""
     state = await session_repository.snapshot(session_id)
+    if state is None:
+        raise HTTPException(404, "session not found")
+    return state
+
+
+@v1.patch("/sessions/{session_id}")
+async def rename_session(session_id: str, body: SessionRenameIn,
+                         user_id: str = Depends(current_user)):
+    """세션에 표시 이름을 붙이거나 바꾼다(name 빈 값이면 이름 해제).
+
+    프론트가 세션 ID(코드) 대신 이 이름을 보여주기 위한 것. 반환은 갱신된 세션
+    스냅샷(name 포함). 세션이 없거나 내 세션이 아니면 404. 로그인 사용자(user_id)
+    소유 확인을 거치므로, 남의 대화방 이름은 바꿀 수 없다."""
+    state = await session_repository.rename(session_id, body.name, user_id)
     if state is None:
         raise HTTPException(404, "session not found")
     return state

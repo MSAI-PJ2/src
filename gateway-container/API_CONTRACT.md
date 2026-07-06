@@ -581,8 +581,10 @@ resources = [지역 창구(최대 3)... , 전국 공통 3종]
 ## 14. Session API와 Cosmos DB 계약
 
 ```http
-POST /v1/sessions
-GET /v1/sessions/{session_id}
+POST   /v1/sessions
+GET    /v1/sessions
+GET    /v1/sessions/{session_id}
+PATCH  /v1/sessions/{session_id}      # 표시 이름 설정/해제 (아래 '세션 표시 이름' 참고)
 ```
 
 세션 저장소는 `SESSION_REPOSITORY` 환경변수로 선택한다.
@@ -612,6 +614,7 @@ Partition key: /session_id
 {
   "id": "<session_id>",
   "session_id": "<session_id>",
+  "name": "승진 발표 상담",
   "created_at": "2026-07-01T00:00:00+00:00",
   "updated_at": "2026-07-01T00:00:10+00:00",
   "turn_count": 2,
@@ -664,12 +667,29 @@ primary 와 **함께 선택한**(selected=true, threshold 이상) 부차 왜곡 
 ```json
 {
   "session_id": "cosmos-session-smoke-1",
+  "name": "승진 발표 상담",
   "created_at": "2026-07-01T05:00:00+00:00",
   "updated_at": "2026-07-01T05:01:00+00:00",
   "turn_count": 4,
   "turns": []
 }
 ```
+
+### 세션 표시 이름 (`name`, 2026-07 도입 — 세션 ID 코드 노출 대체)
+
+세션 문서에 `name`(사용자가 붙이는 대화방 표시 이름) 필드가 있다. 프론트는 세션 ID(무작위
+코드) 대신 이 이름을 보여준다. 목록/헤더 표기 권장 형식은 **`name` + session_id 뒤 4~6자**
+조합이다 (예: `승진 발표 상담 · 3f9c`) — 같은 이름이 여러 개여도 구분되도록.
+
+- **폴백 순서**: `name`(있으면) → `preview`(첫 사용자 발화 40자) → 날짜. `name`/`preview`
+  모두 없으면 프론트가 날짜 + session_id 뒤 4~6자로 표기하고 **원본 전체 ID(코드)는 노출하지
+  않는다.**
+- **설정/변경/해제**: `PATCH /v1/sessions/{session_id}` 바디 `{"name": "..."}`. name 을 빈
+  문자열/공백/`null` 로 보내면 이름을 지운다(폴백으로 복귀). 서버가 한 줄로 정규화(줄바꿈·연속
+  공백 축약)하고 60자로 자른다. 응답은 갱신된 세션 스냅샷(`name` 포함).
+- **소유권**: 로그인 사용자(user_id) 소유 세션만 이름 변경 가능. 남의 세션·없는 세션은 404.
+- `GET /v1/sessions`(내 세션 목록)과 `GET /v1/sessions/{id}` 응답에 `name` 포함(미설정 시 `null`).
+  기존 세션은 마이그레이션 없이 `name=null` 로 폴백 처리된다.
 
 검증 결과:
 
