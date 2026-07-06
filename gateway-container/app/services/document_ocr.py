@@ -29,6 +29,8 @@ import re
 
 import httpx
 
+from .. import settings
+
 _client = None  # DocumentIntelligenceClient — 첫 호출 시 생성해 재사용
 
 
@@ -153,12 +155,41 @@ def build_conversation(parsed_lines: list) -> list:
 # PROFILES 에 한 줄 등록하면 된다 (요청의 ocr.profile 값과 짝).
 # ---------------------------------------------------------------------------
 
+def _kakao_context_classify_text(conversation: list, max_chars: int) -> str:
+    """[옵션2] 상대방 발화를 '맥락'으로 포함한 분류 입력을 만든다 (화자 라벨 포맷).
+
+    "상대방: …\\n나: …" 흐름으로, 뒤에서부터 max_chars 예산만큼 담아 마지막(내담자) 발화를
+    반드시 보존한다. 상대방 발화는 '나' 발화를 해석할 맥락으로만 쓰이며(진단 대상은 '나'),
+    저장·표시는 user_text('나'만)로 남는다 — 과정은 블랙박스. 상대방 발화가 없으면 "" 반환
+    (그 경우 호출부가 user_text 로 폴백). 실측 근거: 화자 라벨 맥락이 모호한 '나' 발화의
+    분류를 크게 개선한다("거봐 역시 나랑 얘기하기 싫은거잖아" → 나만=불충분, 맥락=성급한 판단)."""
+    if not any(m.get("speaker") != "나" for m in conversation):
+        return ""  # 전부 '나' — 맥락 없음, user_text 로 충분
+    lines, total = [], 0
+    for m in reversed(conversation):
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        line = f"{'나' if m.get('speaker') == '나' else '상대방'}: {content}"
+        if lines and total + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(reversed(lines))
+
+
 def _parse_kakao(page_data: dict, sender_names: list[str] | None) -> dict:
-    """카카오톡 캡쳐: 팀원 파이프라인으로 화자를 분리하고 "나"(내담자) 발화만 상담 입력으로."""
+    """카카오톡 캡쳐: 화자를 분리해 '나' 발화를 상담 입력으로, 상대방 발화는 맥락으로.
+
+    - user_text: '나'(내담자) 발화만 — 저장·표시·safety·RAG 의 입력
+    - classify_text: [옵션2] 상대방+나 대화를 화자 라벨로 엮은 분류 전용 맥락 입력 (없으면 "")
+    - conversation: 나+상대방 전체 로그 — 프론트 표시·세션 보존
+    """
     conversation = build_conversation(parse_lines(page_data, set(sender_names or [])))
     user_text = "\n".join(m.get("content", "") for m in conversation
                           if m.get("speaker") == "나").strip()
-    return {"conversation": conversation, "user_text": user_text}
+    classify_text = _kakao_context_classify_text(conversation, settings.CLASSIFY_CONTEXT_MAX_CHARS)
+    return {"conversation": conversation, "user_text": user_text, "classify_text": classify_text}
 
 
 def _parse_generic(page_data: dict, sender_names: list[str] | None) -> dict:
