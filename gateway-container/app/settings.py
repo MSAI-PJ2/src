@@ -90,9 +90,14 @@ INSUFFICIENT_ESCAPE_AFTER = int(os.getenv("INSUFFICIENT_ESCAPE_AFTER", "4"))
 
 # --- 멀티라벨 보조 지침: 프롬프트에 넣을 왜곡 접근 지침의 최대 개수 (주 지침 포함) ---
 # 멀티라벨 분류기는 왜곡을 여러 개 동시 선택할 수 있다(threshold 0.55 이상 전부).
-# 기본 2 = 주 지침 + 보조 지침 1개. 지침을 3개 이상 쌓으면 서로 희석되어 답변이
-# 산만해지므로 늘릴 때 주의. 1 = 보조 지침 끔 (primary 단독, 도입 이전 동작).
-LABEL_GUIDANCE_MAX = int(os.getenv("LABEL_GUIDANCE_MAX", "2"))
+# 기본 3 = 주 지침 + 보조 지침 2개. 근거(테스트셋 1,000건, 배포 가중치 실측):
+#   왜곡 primary 턴의 selected 왜곡 개수 = 1개 16.5% / 2개 74.4% / 3개 8.6% / 4개 0.4%
+#   (학습 gold 도 2개 81%가 지배적, 3개 5.3%, 4개는 소수). 그래서 3 으로 두면
+#   selected 왜곡이 실제로 3개 이상인 ~9% 턴에서만 3번째 지침이 추가로 붙고, 대부분
+#   (2개=74%)은 주+보조1 로 동일하다. 4개(0.4%)면 score 상위 3개만 쓴다.
+# 지침을 더 쌓으면(≥4) 서로 희석돼 답변이 산만해질 수 있어 상한을 3 으로 둔다.
+# 1 = 보조 지침 끔 (primary 단독, 도입 이전 동작).
+LABEL_GUIDANCE_MAX = int(os.getenv("LABEL_GUIDANCE_MAX", "3"))
 
 # --- 위기 지역 연락처 DB (respond/policy.py 구획 3) ---
 # HOTLINE_CONTAINER 를 채우면 켜짐 — 세션과 같은 Cosmos 계정(COSMOS_*)을 쓴다.
