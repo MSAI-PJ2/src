@@ -300,6 +300,10 @@ async def healthz():
 @v1.post("/classify")
 async def classify(body: ClassifyIn):
     """문장 1개를 인지왜곡 분류기(cogdist)에 보내 라벨을 받는다."""
+    # 빈 문자열 선행 가드 — cogdist 의 422 를 raise_for_status() 가 500 으로
+    # 바꿔버리는 공백 봉합 (서버·배치 경로와 동일 문구, 2026-07-05 실배포 검증에서 발견)
+    if not body.text.strip():
+        raise HTTPException(status_code=422, detail="text must be a non-empty string")
     return await services.classifier.classify_one(body.text, body.threshold)
 
 
