@@ -366,6 +366,7 @@ async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
                                              profile=context.ocr_profile)
     conversation = result.get("conversation") or []
     user_text = (result.get("user_text") or "").strip()
+    classify_text = (result.get("classify_text") or "").strip() or None  # [옵션2] 상대방 맥락 포함 분류 입력(kakao)
 
     # 세션에는 원본 base64 를 빼고 저장한다 (Cosmos 문서 크기 한도·비용 보호)
     slim_image = {k: v for k, v in context.image.items() if k != "data"}
@@ -393,7 +394,7 @@ async def ocr_then_respond_stream(session_id=None, input_meta=None, tts=None, ll
     # [progress] 1단계(extract) 완료 신고: 이미지 → 텍스트(OCR) 변환이 끝났다 (STT 흐름과 대칭).
     yield sse(progress_event(session_id, "extract", stage_plan(extracted=True, tts=tts)))
     async for event in respond_stream(user_text, session_id, stored_meta, tts, llm,
-                                      extracted=True, user_id=user_id):
+                                      extracted=True, user_id=user_id, classify_text=classify_text):
         yield event
 
 
@@ -422,7 +423,8 @@ async def input_pending_stream(session_id=None, input_meta=None, tts=None, user_
 # ══════════════════════════════════════════════════════════════════════════
 
 async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, llm=None,
-                         extracted: bool = False, user_id: str | None = None):
+                         extracted: bool = False, user_id: str | None = None,
+                         classify_text: str | None = None):
     """상담 한 턴의 핵심 흐름.
 
     extracted: 앞에서 STT/OCR 변환(extract 단계)을 이미 거쳤다는 뜻 — progress 신호의
@@ -454,8 +456,15 @@ async def respond_stream(text: str, session_id=None, input_meta=None, tts=None, 
     #    analysis = 이 과정의 관측 기록 (meta 이벤트·세션 저장으로 나감).
     analysis = {"context_merged": False, "merge_rejected_by": None,
                 "merge_trigger": None, "ladder_step": 0}
+    # [옵션2 · OCR 맥락] 카톡 캡쳐는 이미지 안에 상대방+나 대화가 있다. classify_text 가 오면
+    # 그 화자-라벨 맥락으로 분류한다(상대방=맥락, 나=진단 대상) — 세션 선행 필터는 건너뛴다
+    # (이미지가 자체 맥락을 가지므로 이중 병합 방지). 저장·safety·RAG 입력은 그대로 text('나'만) — 블랙박스.
     classify_input = text
-    if settings.CLASSIFY_PREMERGE and settings.CLASSIFY_CONTEXT_MAX_TURNS > 0:
+    if classify_text:
+        classify_input = classify_text
+        analysis["context_merged"] = True
+        analysis["merge_trigger"] = "ocr_conversation"
+    elif settings.CLASSIFY_PREMERGE and settings.CLASSIFY_CONTEXT_MAX_TURNS > 0:
         turns_hist = session.get("turns") or []
         window = context_merge.recent_user_texts(turns_hist)
         if window:
